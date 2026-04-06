@@ -1,0 +1,17 @@
+# Build artifacts
+dist/
+*.egg-info/
+
+# IDE
+.idea/
+
+# Generated playlists
+*.m3u
+
+# OpenSpec (not committed yet)
+openspec/
+
+# Python cache
+__pycache__/
+*.pyc
+.pytest_cache/
