@@ -39,27 +39,23 @@ Generate and play music playlists in your terminal from natural language prompts
 
 ## Installation
 
-### Option 1 — curl one-liner (recommended)
+### macOS — Homebrew (recommended)
+
+```bash
+brew tap haoziwlh/autoplaylist https://github.com/haoziwlh/autoplaylist && brew install myplaylist
+```
+
+Homebrew handles everything: Python, mpv, and myplaylist itself.
+
+### macOS / Linux — curl one-liner
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/haoziwlh/autoplaylist/main/install.sh | bash
 ```
 
-The script will:
-1. Detect macOS / Linux
-2. Check for Python 3.9+
-3. Install `pipx` if missing (and guide PATH setup)
-4. Install `myplaylist` via `pipx`
-5. Install `mpv` (Homebrew on macOS, apt on Linux)
+The script detects your OS, installs pipx, myplaylist, and mpv automatically.
 
-### Option 2 — Homebrew tap
-
-```bash
-brew tap haoziwlh/autoplaylist https://github.com/haoziwlh/autoplaylist
-brew install myplaylist
-```
-
-### Option 3 — pipx (manual)
+### Manual — pipx
 
 ```bash
 pipx install myplaylist
@@ -69,11 +65,14 @@ pipx install myplaylist
 > - macOS: `brew install mpv`
 > - Linux: `sudo apt-get install mpv`
 
-On first run, `myplaylist setup` will guide you through choosing an LLM backend and optionally configuring a Last.fm API key.
+On first run, myplaylist will automatically guide you through setup (LLM backend, optional Last.fm key).
 
 ## Quick Start
 
 ```bash
+# Play your most recent playlist instantly
+myplaylist
+
 # Natural language prompt
 myplaylist new "rainy day lo-fi jazz for working"
 
@@ -91,12 +90,13 @@ myplaylist new "chill beats" --count 30 --name my-chill-list
 
 | Command | Description |
 |---|---|
+| `myplaylist` | Play the most recent playlist |
 | `myplaylist new "<prompt>"` | Generate playlist from natural language |
 | `myplaylist new --seed "<song>"` | Generate playlist from seed song |
 | `myplaylist new ... --count <n>` | Set track count (default 20, max 50) |
 | `myplaylist list` | List all saved playlists |
 | `myplaylist show <name>` | Show track listing |
-| `myplaylist play <name>` | Play in terminal |
+| `myplaylist play [name]` | Play a playlist (defaults to most recent) |
 | `myplaylist export <name> --format m3u\|csv\|json` | Export playlist |
 | `myplaylist delete <name>` | Delete a playlist |
 | `myplaylist setup` | Choose LLM backend and configure API keys |
@@ -113,6 +113,7 @@ myplaylist new "chill beats" --count 30 --name my-chill-list
 | `0`–`9` + `Enter` | Jump to track by number |
 | `+` | Append ~10 more tracks (background, non-blocking) |
 | `l` | Toggle lyrics panel (time-synced lyrics + mood animation) |
+| `[` / `]` | Switch to previous / next playlist |
 | `d` | Delete cursor track from live playlist |
 | `s` | Save current playlist to disk |
 | `q` | Quit |

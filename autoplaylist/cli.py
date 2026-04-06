@@ -19,7 +19,6 @@ _EPILOG = (
 app = typer.Typer(
     name="myplaylist",
     help="Generate and play music playlists from prompts or seed songs.",
-    no_args_is_help=True,
     rich_markup_mode="rich",
     epilog=_EPILOG,
 )
@@ -27,7 +26,9 @@ app = typer.Typer(
 
 @app.callback(invoke_without_command=True)
 def main(ctx: typer.Context) -> None:
-    pass
+    if ctx.invoked_subcommand is None:
+        from autoplaylist import _commands
+        _commands.cmd_play(None)
 
 
 @app.command()
@@ -66,7 +67,7 @@ def show(name: str = typer.Argument(..., help="Playlist name")) -> None:
 
 
 @app.command()
-def play(name: str = typer.Argument(..., help="Playlist name")) -> None:
+def play(name: Optional[str] = typer.Argument(None, help="Playlist name (default: most recent)")) -> None:
     """Play a saved playlist in the terminal.
 
     \b
@@ -77,6 +78,7 @@ def play(name: str = typer.Argument(..., help="Playlist name")) -> None:
       ← →      previous / next page
       0-9      jump to track number + Enter
       Enter    play selected track
+      [ ]      previous / next playlist
       q        quit
     """
     from autoplaylist import _commands

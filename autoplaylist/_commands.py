@@ -160,15 +160,40 @@ def cmd_delete(name: str) -> None:
 # play / export — delegate to player/export modules
 # ---------------------------------------------------------------------------
 
-def cmd_play(name: str) -> None:
-    try:
-        data = pl.load(name)
-    except FileNotFoundError as e:
-        console.print(f"[red]{e}[/red]")
+def cmd_play(name: Optional[str] = None) -> None:
+    all_playlists = pl.list_all()
+    if not all_playlists:
+        console.print("[red]No playlists found. Run `myplaylist new` to create one.[/red]")
         raise SystemExit(1)
-    tracks = pl.tracks_from_data(data)
+
+    if name is None:
+        active_idx = 0
+    else:
+        names = [p["name"] for p in all_playlists]
+        if name not in names:
+            console.print(f"[red]Playlist '{name}' not found.[/red]")
+            console.print(f"Available: {', '.join(names)}")
+            raise SystemExit(1)
+        active_idx = names.index(name)
+
+    playlists = []
+    for p in all_playlists:
+        try:
+            data = pl.load(p["name"])
+            playlists.append({
+                "name": p["name"],
+                "tracks": pl.tracks_from_data(data),
+                "prompt": data.get("prompt", ""),
+            })
+        except FileNotFoundError:
+            pass
+
+    if not playlists:
+        console.print("[red]No playlists found. Run `myplaylist new` to create one.[/red]")
+        raise SystemExit(1)
+
     from autoplaylist.player import play_playlist
-    play_playlist(name, tracks, data.get("prompt", ""))
+    play_playlist(playlists, active_idx)
 
 
 def cmd_export(name: str, format: str, output: Optional[str]) -> None:

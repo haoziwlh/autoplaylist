@@ -332,12 +332,12 @@ _BAR_W = 16    # progress bar block width
 # ---------------------------------------------------------------------------
 # full bar: text labels only (no symbols), shown when terminal is wide enough (~92 cols)
 _CTRL_VIS_FULL_OPEN  = ("  [p] pause [n] next [↑↓] sel [←→] pg"
-                         " [↵] play [q] quit [L] lyrics [+] more [d] del [s] save")
+                         " [↵] play [q] quit [L] lyrics [+] more [d] del [s] save  [[] prev []] next")
 _CTRL_VIS_FULL_CLOSE = ("  [p] pause [n] next [↑↓] sel [←→] pg"
-                         " [↵] play [q] quit [l] lyrics [+] more [d] del [s] save")
+                         " [↵] play [q] quit [l] lyrics [+] more [d] del [s] save  [[] prev []] next")
 # compact: symbols only, fits ≤ 80 (panel-closed box)
-_CTRL_VIS_SHORT_OPEN  = "  [p]⏸  [n]⏭  [↑↓]  [←→]  [↵]▶  [q]✕  [L]♪  [+]  [d]✗  [s]↓"
-_CTRL_VIS_SHORT_CLOSE = "  [p]⏸  [n]⏭  [↑↓]  [←→]  [↵]▶  [q]✕  [l]♪  [+]  [d]✗  [s]↓"
+_CTRL_VIS_SHORT_OPEN  = "  [p]⏸  [n]⏭  [↑↓]  [←→]  [↵]▶  [q]✕  [L]♪  [+]  [d]✗  [s]↓  [[]←  []]→"
+_CTRL_VIS_SHORT_CLOSE = "  [p]⏸  [n]⏭  [↑↓]  [←→]  [↵]▶  [q]✕  [l]♪  [+]  [d]✗  [s]↓  [[]←  []]→"
 
 
 def _ctrl_bar(avail: int, panel_open: bool) -> tuple[str, str]:
@@ -349,11 +349,13 @@ def _ctrl_bar(avail: int, panel_open: bool) -> tuple[str, str]:
         vis = vis_full
         disp = (f"  {_D}[p]{_R} pause {_D}[n]{_R} next {_D}[↑↓]{_R} sel {_D}[←→]{_R} pg"
                 f" {_D}[↵]{_R} play {_D}[q]{_R} quit {Ld} lyrics {_D}[+]{_R} more"
-                f" {_D}[d]{_R} del {_D}[s]{_R} save")
+                f" {_D}[d]{_R} del {_D}[s]{_R} save"
+                f"  {_D}[[]" f"{_R} prev {_D}[]]" f"{_R} next")
     else:
         vis = vis_short
         disp = (f"  {_D}[p]{_R}⏸  {_D}[n]{_R}⏭  {_D}[↑↓]{_R}  {_D}[←→]{_R}"
-                f"  {_D}[↵]{_R}▶  {_D}[q]{_R}✕  {Ld}♪  {_D}[+]{_R}  {_D}[d]{_R}✗  {_D}[s]{_R}↓")
+                f"  {_D}[↵]{_R}▶  {_D}[q]{_R}✕  {Ld}♪  {_D}[+]{_R}  {_D}[d]{_R}✗  {_D}[s]{_R}↓"
+                f"  {_D}[[]" f"{_R}←  {_D}[]]" f"{_R}→")
     return vis, disp
 
 
@@ -630,7 +632,21 @@ def _box_row(vis: str, disp: str, inner_width: int = _IW) -> str:
 # Main player
 # ---------------------------------------------------------------------------
 
-def play_playlist(playlist_name: str, tracks: list[Track], prompt: str = "") -> None:
+def play_playlist(playlists: list[dict], active_idx: int = 0) -> None:
+    """Play playlists with tab switching support.
+
+    Each dict in playlists must have: name (str), tracks (list[Track]), prompt (str).
+    active_idx selects the initially active playlist.
+    """
+    if not playlists:
+        print("No playlists available.")
+        return
+
+    # Unpack active playlist
+    playlist_name: str = playlists[active_idx]["name"]
+    tracks: list[Track] = list(playlists[active_idx]["tracks"])
+    prompt: str = playlists[active_idx]["prompt"]
+
     if not tracks:
         print("Playlist is empty.")
         return
@@ -646,6 +662,7 @@ def play_playlist(playlist_name: str, tracks: list[Track], prompt: str = "") -> 
     lyric_panel_on: bool = False
     _panel_widths: Optional[tuple[int, int, int]] = None
     _appending = [False]   # True while background append is running
+    _switch_tab = [0]      # 0=no switch, -1=prev, +1=next
 
     # ── viewport helpers ──────────────────────────────────────────────────────
 
@@ -712,12 +729,12 @@ def play_playlist(playlist_name: str, tracks: list[Track], prompt: str = "") -> 
         nt = len(tracks)
         a, b = view_start[0] + 1, min(nt, view_start[0] + vh)
         page_info = f"{a}-{b}/{nt}" if nt > vh else f"{nt} tracks"
-        lft = "  myplaylist  "
+        lft = "  ♫ myplaylist  "
         rgt_vis  = f"  {playlist_name} ({page_info})  "
         rgt_disp = f"  {_YL}{playlist_name}{_R} ({page_info})  "
         hpad = max(0, _IW - len(lft) - _cjk_width(rgt_vis))
         hdr_vis  = f"{lft}{' ' * hpad}{rgt_vis}"
-        hdr_disp = f"  {_B}{_CY}myplaylist{_R}  " + " " * hpad + rgt_disp
+        hdr_disp = f"  {_B}{_CY}♫ myplaylist{_R}  " + " " * hpad + rgt_disp
         lines_up = 3 + vh + 2   # up: _BOT, ctrl, mid, vh tracks, mid, header
         sys.stdout.write(
             f"\033[s\033[{lines_up}A\r{_box_row(hdr_vis, hdr_disp)}\033[u"
@@ -735,14 +752,14 @@ def play_playlist(playlist_name: str, tracks: list[Track], prompt: str = "") -> 
         nt = len(tracks)
         a, b = view_start[0] + 1, min(nt, view_start[0] + vh)
         page_info = f"{a}-{b}/{nt}" if nt > vh else f"{nt} tracks"
-        lft = "  myplaylist  "
+        lft = "  ♫ myplaylist  "
         rgt_vis  = f"  {playlist_name} ({page_info})  "
         rgt_disp = f"  {_YL}{playlist_name}{_R} ({page_info})  "
 
         if not panel_open:
             hpad = max(0, _IW_NORMAL - len(lft) - _cjk_width(rgt_vis))
             hdr_vis  = f"{lft}{' ' * hpad}{rgt_vis}"
-            hdr_disp = f"  {_B}{_CY}myplaylist{_R}  " + " " * hpad + rgt_disp
+            hdr_disp = f"  {_B}{_CY}♫ myplaylist{_R}  " + " " * hpad + rgt_disp
             ctrl_vis, ctrl_disp = _ctrl_bar(_IW_NORMAL, False)
             ctrl_pad  = max(0, _IW_NORMAL - _cjk_width(ctrl_vis))
             lines = [
@@ -766,7 +783,7 @@ def play_playlist(playlist_name: str, tracks: list[Track], prompt: str = "") -> 
             lbl_w = max(10, plw - 20)
             hpad = max(0, plw - len(lft) - _cjk_width(rgt_vis))
             hdr_vis  = f"{lft}{' ' * hpad}{rgt_vis}"
-            hdr_disp = f"  {_B}{_CY}myplaylist{_R}  " + " " * hpad + rgt_disp
+            hdr_disp = f"  {_B}{_CY}♫ myplaylist{_R}  " + " " * hpad + rgt_disp
             hdr_pad  = max(0, plw - _cjk_width(hdr_vis))
             # Song title + artist in right-column header
             t = tracks[current_idx]
@@ -871,12 +888,12 @@ def play_playlist(playlist_name: str, tracks: list[Track], prompt: str = "") -> 
     # ── initial box ───────────────────────────────────────────────────────────
     a0, b0 = 1, min(n, vh)
     page_info0 = f"{a0}-{b0}/{n}" if n > vh else f"{n} tracks"
-    lft = "  myplaylist  "
+    lft = "  ♫ myplaylist  "
     rgt_vis0  = f"  {playlist_name} ({page_info0})  "
     rgt_disp0 = f"  {_YL}{playlist_name}{_R} ({page_info0})  "
     hpad0 = max(0, _IW - len(lft) - _cjk_width(rgt_vis0))
     hdr_vis0  = f"{lft}{' ' * hpad0}{rgt_vis0}"
-    hdr_disp0 = f"  {_B}{_CY}myplaylist{_R}  " + " " * hpad0 + rgt_disp0
+    hdr_disp0 = f"  {_B}{_CY}♫ myplaylist{_R}  " + " " * hpad0 + rgt_disp0
 
     ctrl_vis, ctrl_disp = _ctrl_bar(_IW, False)
     ctrl_pad  = max(0, _IW - _cjk_width(ctrl_vis))
@@ -900,10 +917,15 @@ def play_playlist(playlist_name: str, tracks: list[Track], prompt: str = "") -> 
     def stop_current() -> None:
         nonlocal ytdlp_proc, mpv_proc
         _mpv_quit()
+        # Send SIGKILL to both first, then wait — avoids serial blocking
         if mpv_proc and mpv_proc.poll() is None:
-            mpv_proc.terminate(); mpv_proc.wait()
+            mpv_proc.kill()
         if ytdlp_proc and ytdlp_proc.poll() is None:
-            ytdlp_proc.terminate(); ytdlp_proc.wait()
+            ytdlp_proc.kill()
+        if mpv_proc:
+            mpv_proc.wait()
+        if ytdlp_proc:
+            ytdlp_proc.wait()
         mpv_proc = ytdlp_proc = None
 
     def _sigint_handler(signum, frame):
@@ -933,6 +955,49 @@ def play_playlist(playlist_name: str, tracks: list[Track], prompt: str = "") -> 
 
     try:
         while True:
+            # ── tab switch ────────────────────────────────────────────────────
+            if _switch_tab[0] != 0:
+                old_vh = vh
+                active_idx = (active_idx + _switch_tab[0]) % len(playlists)
+                _switch_tab[0] = 0
+                playlist_name = playlists[active_idx]["name"]
+                tracks = list(playlists[active_idx]["tracks"])
+                prompt = playlists[active_idx]["prompt"]
+                n = len(tracks)
+                vh = min(_VIEW_H, n)
+                view_start[0] = 0
+                current_idx = 0
+                cursor_idx = 0
+                paused = False
+                _lyric.update({"line": None, "off": 0, "idx": None,
+                               "pos": None, "mood": "calm", "anim_t": 0})
+                lyric_panel_on = False
+                _panel_widths = None
+                _appending[0] = False
+                # Repaint: erase old box + redraw new
+                NL = "\033[K\r\n"
+                sys.stdout.write(f"\033[{old_vh + 7}A\r\033[J")
+                nt = n
+                a0, b0 = 1, min(nt, vh)
+                page_info0 = f"{a0}-{b0}/{nt}" if nt > vh else f"{nt} tracks"
+                lft0 = "  ♫ myplaylist  "
+                rgt_vis0  = f"  {playlist_name} ({page_info0})  "
+                rgt_disp0 = f"  {_YL}{playlist_name}{_R} ({page_info0})  "
+                hpad0 = max(0, _IW - len(lft0) - _cjk_width(rgt_vis0))
+                hdr_vis0  = f"{lft0}{' ' * hpad0}{rgt_vis0}"
+                hdr_disp0 = (f"  {_B}{_CY}♫ myplaylist{_R}  "
+                             + " " * hpad0 + rgt_disp0)
+                ctrl_vis, ctrl_disp = _ctrl_bar(_IW, False)
+                ctrl_pad = max(0, _IW - _cjk_width(ctrl_vis))
+                lines = [NL, _TOP + NL, _box_row(hdr_vis0, hdr_disp0) + NL, _MID + NL]
+                for i in range(vh):
+                    vis  = _track_inner_vis(i, i == 0, i == 0, tracks)
+                    disp = _track_inner_disp(i, i == 0, False, i == 0, tracks)
+                    lines.append(_box_row(vis, disp) + NL)
+                lines += [_MID + NL, f"│{ctrl_disp}{' ' * ctrl_pad}│" + NL, _BOT + NL]
+                _w("".join(lines))
+                sys.stdout.flush()
+
             if current_idx >= len(tracks):
                 current_idx = 0
                 cursor_idx = 0
@@ -968,8 +1033,36 @@ def play_playlist(playlist_name: str, tracks: list[Track], prompt: str = "") -> 
                 target=_classify_mood_bg, args=(_t.artist, _t.title), daemon=True
             ).start()
 
-            time.sleep(3)
-            if mpv_proc.poll() is not None:
+            # Poll up to 3 s for mpv to start, but stay key-responsive
+            _load_start = time.time()
+            _load_skip = False
+            _load_key: Optional[str] = None
+            while time.time() - _load_start < 3.0:
+                time.sleep(0.1)
+                _load_key = key_reader.consume()
+                if _load_key in ("[", "]", "q"):
+                    break
+                if mpv_proc.poll() is not None:
+                    _load_skip = True
+                    break
+
+            if _load_key == "q":
+                stop_current(); sys.stdout.write(_NL); return
+
+            if _load_key in ("[", "]"):
+                if len(playlists) == 1:
+                    _status("Only one playlist")
+                else:
+                    try:
+                        from autoplaylist import playlist as _pl
+                        _pl.save(playlist_name, tracks, prompt)
+                    except Exception:
+                        pass
+                    stop_current()
+                    _switch_tab[0] = -1 if _load_key == "[" else 1
+                continue
+
+            if _load_skip or mpv_proc.poll() is not None:
                 _status(f"Skipped  {label}")
                 old = current_idx; current_idx += 1
                 if current_idx < len(tracks):
@@ -1115,6 +1208,19 @@ def play_playlist(playlist_name: str, tracks: list[Track], prompt: str = "") -> 
                         _status(f"Saved  {playlist_name}  [{len(tracks)} tracks]")
                     except Exception as e:
                         _status(f"Save failed: {str(e)[:60]}")
+
+                elif key in ("[", "]"):
+                    if len(playlists) == 1:
+                        _status("Only one playlist")
+                    else:
+                        try:
+                            from autoplaylist import playlist as _pl
+                            _pl.save(playlist_name, tracks, prompt)
+                        except Exception:
+                            pass
+                        stop_current()
+                        _switch_tab[0] = -1 if key == "[" else 1
+                        break
 
                 elif key == "n":
                     stop_current(); old = current_idx; current_idx += 1; paused = False

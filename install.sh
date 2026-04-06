@@ -115,16 +115,8 @@ else
   fi
 fi
 
-# ── 7. first-time setup ───────────────────────────────────────────────────────
-printf '\033[1;32m✓ myplaylist installed successfully!\033[0m\n'
-echo ""
-_info "Running first-time setup..."
-echo ""
-myplaylist setup
-
-# ── 8. success message ────────────────────────────────────────────────────────
-echo ""
-printf '\033[1;32m✓ All done! Create your first playlist:\033[0m\n'
+# ── 7. success message ────────────────────────────────────────────────────────
+printf '\033[1;32m✓ myplaylist installed! Create your first playlist:\033[0m\n'
 echo ""
 echo '    myplaylist new "chill lo-fi beats"'
 echo '    myplaylist new --seed "后来 - 刘若英"'
