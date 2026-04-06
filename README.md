@@ -5,6 +5,16 @@
 
 Generate and play music playlists in your terminal from natural language prompts or seed songs.
 
+## Why myplaylist?
+
+- **AI-native, terminal-first** — describe any mood or song in plain language and get a curated playlist instantly, without leaving your terminal
+- **Ad-free playback** — streams directly from YouTube via yt-dlp and mpv; no ads, no interruptions
+- **You own your playlists** — add, delete, reorder, and save tracks live during playback; export to M3U/CSV/JSON for use anywhere
+- **Vast music catalog** — any song on YouTube is fair game, from mainstream hits to obscure jazz recordings and everything in between
+- **No account, no tracking** — everything stays local in `~/.myplaylist/`; no sign-up, no cloud sync, no data collection
+- **Zero extra subscription** — works with your existing Claude subscription, or a minimal Gemini API key; no music platform membership required
+- **Immersive terminal experience** — time-synced lyrics and mood-driven ASCII animations keep the vibe going while you work
+
 ## Features
 
 - **Natural language prompts**: `myplaylist new "下雨天的 lo-fi jazz"`
