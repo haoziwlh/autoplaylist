@@ -7,19 +7,13 @@ class Myplaylist < Formula
   license "MIT"
 
   depends_on "python@3.11"
+  depends_on "mpv"
 
   def install
     venv = libexec/"venv"
     system Formula["python@3.11"].opt_bin/"python3.11", "-m", "venv", venv
     system venv/"bin/pip", "install", "myplaylist==#{version}"
     bin.install_symlink venv/"bin/myplaylist"
-  end
-
-  def caveats
-    <<~EOS
-      myplaylist requires mpv for playback. Install it with:
-        brew install mpv
-    EOS
   end
 
   test do
