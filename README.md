@@ -137,6 +137,16 @@ Last.fm integration improves similar-song quality. Get a free API key at <https:
     <name>.json        # Saved playlists
 ```
 
+## Upgrade
+
+```bash
+# pipx
+pipx upgrade myplaylist
+
+# Homebrew
+brew upgrade myplaylist
+```
+
 ## Uninstall
 
 ```bash
