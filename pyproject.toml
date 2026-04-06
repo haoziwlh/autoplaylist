@@ -40,8 +40,8 @@ dependencies = [
 gemini = ["google-generativeai>=0.8"]
 
 [project.urls]
-Homepage = "https://github.com/eddie/autoplaylist"
-Repository = "https://github.com/eddie/autoplaylist"
+Homepage = "https://github.com/haoziwlh/autoplaylist"
+Repository = "https://github.com/haoziwlh/autoplaylist"
 
 [project.scripts]
 myplaylist = "autoplaylist.cli:app"

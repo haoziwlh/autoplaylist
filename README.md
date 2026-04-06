@@ -25,7 +25,7 @@ Generate and play music playlists in your terminal from natural language prompts
 ### Option 1 — curl one-liner (recommended)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/eddie/autoplaylist/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/haoziwlh/autoplaylist/main/install.sh | bash
 ```
 
 The script will:
@@ -38,7 +38,7 @@ The script will:
 ### Option 2 — Homebrew tap
 
 ```bash
-brew tap eddie/myplaylist
+brew tap haoziwlh/autoplaylist https://github.com/haoziwlh/autoplaylist
 brew install myplaylist
 ```
 
@@ -115,7 +115,7 @@ pipx uninstall myplaylist
 
 # If installed via Homebrew tap:
 brew uninstall myplaylist
-brew untap eddie/myplaylist
+brew untap haoziwlh/autoplaylist
 ```
 
 ## Running Tests
