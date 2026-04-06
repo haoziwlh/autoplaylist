@@ -9,7 +9,10 @@ Generate and play music playlists in your terminal from natural language prompts
 
 - **Natural language prompts**: `myplaylist new "下雨天的 lo-fi jazz"`
 - **Seed songs**: `myplaylist new --seed "Norah Jones - Come Away With Me"`
-- **Terminal playback** via mpv with a rich TUI (pause / skip / lyrics marquee)
+- **Terminal playback** via mpv with a rich TUI (pause / skip / lyrics marquee / progress bar)
+- **Lyrics panel**: toggle a side panel showing time-synced lyrics with mood-driven ASCII animations
+- **In-session append**: press `+` to fetch ~10 more tracks without interrupting playback
+- **Playlist loops**: automatically restarts from track 1 after the last track
 - **Local persistence** at `~/.myplaylist/playlists/`
 - **Export** to `.m3u`, `.csv`, or `.json`
 - **Flexible LLM backend**: Claude Code CLI (zero-config) or Gemini API key
@@ -54,7 +57,7 @@ pipx install myplaylist
 > - macOS: `brew install mpv`
 > - Linux: `sudo apt-get install mpv`
 
-On first run, `myplaylist` will walk you through the optional Last.fm API key setup.
+On first run, `myplaylist setup` will guide you through choosing an LLM backend and optionally configuring a Last.fm API key.
 
 ## Quick Start
 
@@ -68,8 +71,8 @@ myplaylist new --seed "Norah Jones - Come Away With Me"
 # Seed from YouTube URL
 myplaylist new --seed "https://www.youtube.com/watch?v=..."
 
-# Custom track count and name
-myplaylist new "chill beats" --count 20 --name my-chill-list
+# Custom track count (default 20, max 50) and name
+myplaylist new "chill beats" --count 30 --name my-chill-list
 ```
 
 ## Commands
@@ -78,12 +81,13 @@ myplaylist new "chill beats" --count 20 --name my-chill-list
 |---|---|
 | `myplaylist new "<prompt>"` | Generate playlist from natural language |
 | `myplaylist new --seed "<song>"` | Generate playlist from seed song |
+| `myplaylist new ... --count <n>` | Set track count (default 20, max 50) |
 | `myplaylist list` | List all saved playlists |
 | `myplaylist show <name>` | Show track listing |
 | `myplaylist play <name>` | Play in terminal |
 | `myplaylist export <name> --format m3u\|csv\|json` | Export playlist |
 | `myplaylist delete <name>` | Delete a playlist |
-| `myplaylist setup` | Re-run first-time setup |
+| `myplaylist setup` | Choose LLM backend and configure API keys |
 
 ## Playback Controls
 
@@ -94,11 +98,22 @@ myplaylist new "chill beats" --count 20 --name my-chill-list
 | `↑ / ↓` | Move cursor up / down |
 | `← / →` | Page up / page down |
 | `Enter` | Jump to selected track |
+| `0`–`9` + `Enter` | Jump to track by number |
+| `+` | Append ~10 more tracks (background, non-blocking) |
+| `l` | Toggle lyrics panel (time-synced lyrics + mood animation) |
+| `d` | Delete cursor track from live playlist |
+| `s` | Save current playlist to disk |
 | `q` | Quit |
+
+## Lyrics Panel
+
+Press `l` during playback to open a side panel with time-synced lyrics fetched from [lrclib.net](https://lrclib.net). The panel also shows a mood-driven ASCII animation in the margin — determined per track by the LLM (calm, melancholic, energetic, romantic, nostalgic).
+
+Requires terminal width ≥ 84 columns.
 
 ## Last.fm (optional)
 
-Last.fm integration improves similar-song quality. Get a free API key at <https://www.last.fm/api/account/create> and enter it during first-run setup. You can skip this and run in yt-dlp-only mode.
+Last.fm integration improves similar-song quality. Get a free API key at <https://www.last.fm/api/account/create> and enter it during `myplaylist setup`. You can skip this and run in yt-dlp-only mode.
 
 ## Data Storage
 
