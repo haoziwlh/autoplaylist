@@ -1,4 +1,6 @@
 class Myplaylist < Formula
+  include Language::Python::Virtualenv
+
   desc "AI-powered music playlist generator and player"
   homepage "https://github.com/haoziwlh/autoplaylist"
   url "https://files.pythonhosted.org/packages/py3/m/myplaylist/myplaylist-0.1.0-py3-none-any.whl",
