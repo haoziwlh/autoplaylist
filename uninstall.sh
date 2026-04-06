@@ -1,13 +1,22 @@
 #!/bin/bash
 set -e
 
-echo "🗑  Uninstalling autoplaylist..."
+echo "🗑  Uninstalling myplaylist..."
 
-# Python package
-pip uninstall autoplaylist -y -q 2>/dev/null && echo "  ✓ Python package removed" || echo "  - Package not installed via pip"
+# Python package (pipx)
+if command -v pipx &>/dev/null && pipx list 2>/dev/null | grep -q "myplaylist"; then
+  pipx uninstall myplaylist -q && echo "  ✓ myplaylist removed (pipx)"
+else
+  echo "  - myplaylist not installed via pipx"
+fi
+
+# Homebrew tap install
+if command -v brew &>/dev/null && brew list myplaylist &>/dev/null 2>&1; then
+  brew uninstall myplaylist && echo "  ✓ myplaylist removed (brew)"
+fi
 
 # Data directory
-DATA_DIR="$HOME/.autoplaylist"
+DATA_DIR="$HOME/.myplaylist"
 if [ -d "$DATA_DIR" ]; then
   read -rp "  Remove all playlists and config at $DATA_DIR? [y/N] " confirm
   if [[ "$confirm" =~ ^[Yy]$ ]]; then

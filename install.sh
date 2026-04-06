@@ -5,9 +5,23 @@
 set -euo pipefail
 
 # ── helpers ──────────────────────────────────────────────────────────────────
+LOG_FILE="${TMPDIR:-/tmp}/myplaylist-install.log"
 _info()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 _warn()  { printf '\033[1;33mwarn:\033[0m %s\n' "$*"; }
 _error() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+
+# Run a command silently, log output; on failure print log and exit
+_run() {
+  if ! "$@" >>"$LOG_FILE" 2>&1; then
+    printf '\033[1;31merror:\033[0m Command failed: %s\n' "$*" >&2
+    printf 'See full log: %s\n' "$LOG_FILE" >&2
+    exit 1
+  fi
+}
+
+# Initialize log
+: >"$LOG_FILE"
+_info "Install log: $LOG_FILE"
 
 # ── 1. OS detection ───────────────────────────────────────────────────────────
 OS="$(uname -s)"
@@ -43,10 +57,13 @@ _info "Using $("$_python" --version)"
 # ── 3. pipx detection & install ──────────────────────────────────────────────
 if ! command -v pipx &>/dev/null; then
   _info "Installing pipx..."
-  "$_python" -m pip install --user --quiet pipx
-
-  # Ensure ~/.local/bin is in PATH for this session
-  export PATH="$HOME/.local/bin:$PATH"
+  if [ "$OS" = "Darwin" ] && command -v brew &>/dev/null; then
+    HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1 _run brew install pipx
+    _run pipx ensurepath
+  else
+    _run "$_python" -m pip install --user pipx
+    export PATH="$HOME/.local/bin:$PATH"
+  fi
 
   if ! command -v pipx &>/dev/null; then
     _warn "pipx installed but not found in PATH."
@@ -76,7 +93,7 @@ fi
 
 # ── 5. install myplaylist ─────────────────────────────────────────────────────
 _info "Installing myplaylist via pipx..."
-pipx install myplaylist
+_run pipx install myplaylist
 
 # ── 6. mpv detection & install ───────────────────────────────────────────────
 if command -v mpv &>/dev/null; then
@@ -87,22 +104,28 @@ else
     if ! command -v brew &>/dev/null; then
       _warn "Homebrew not found. Please install mpv manually: https://mpv.io/installation/"
     else
-      HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1 brew install mpv
+      HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1 _run brew install mpv
     fi
   else
     if command -v apt-get &>/dev/null; then
-      sudo apt-get install -y mpv
+      _run sudo apt-get install -y mpv
     else
       _warn "apt-get not found. Please install mpv manually: https://mpv.io/installation/"
     fi
   fi
 fi
 
-# ── 7. success message ────────────────────────────────────────────────────────
-echo ""
+# ── 7. first-time setup ───────────────────────────────────────────────────────
 printf '\033[1;32m✓ myplaylist installed successfully!\033[0m\n'
 echo ""
-echo "  Quick start:"
+_info "Running first-time setup..."
+echo ""
+myplaylist setup
+
+# ── 8. success message ────────────────────────────────────────────────────────
+echo ""
+printf '\033[1;32m✓ All done! Create your first playlist:\033[0m\n'
+echo ""
 echo '    myplaylist new "chill lo-fi beats"'
 echo '    myplaylist new --seed "后来 - 刘若英"'
 echo ""
