@@ -5,6 +5,8 @@
 
 Generate and play music playlists in your terminal from natural language prompts or seed songs.
 
+![myplaylist TUI — playlist view with lyrics panel and mood animation](assets/screenshot.png)
+
 ## Why myplaylist?
 
 - **AI-native, terminal-first** — describe any mood or song in plain language and get a curated playlist instantly, without leaving your terminal
