@@ -12,13 +12,15 @@ Generate and play music playlists in your terminal from natural language prompts
 - **Terminal playback** via mpv with a rich TUI (pause / skip / lyrics marquee)
 - **Local persistence** at `~/.myplaylist/playlists/`
 - **Export** to `.m3u`, `.csv`, or `.json`
-- **Zero-config LLM**: uses your existing Claude subscription via `claude -p`
+- **Flexible LLM backend**: Claude Code CLI (zero-config) or Gemini API key
 
 ## Requirements
 
 - Python 3.9+
-- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) (`claude`) — for natural language mode
 - macOS or Linux
+- One of the following LLM backends (for natural language mode):
+  - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) (`claude`) — zero-config if you have a Claude subscription
+  - Gemini API key — set via `myplaylist setup`
 
 ## Installation
 
