@@ -118,6 +118,10 @@ brew uninstall myplaylist
 brew untap haoziwlh/autoplaylist
 ```
 
+## License
+
+MIT — see [LICENSE](LICENSE).
+
 ## Running Tests
 
 ```bash
