@@ -332,9 +332,9 @@ _BAR_W = 16    # progress bar block width
 # ---------------------------------------------------------------------------
 # full bar: text labels only (no symbols), shown when terminal is wide enough (~92 cols)
 _CTRL_VIS_FULL_OPEN  = ("  [p] pause [n] next [↑↓] sel [←→] pg"
-                         " [↵] play [q] quit [L] lyrics [+] more [d] del [s] save  [[] prev []] next")
+                         " [↵] play [q] quit [L] lyrics [+] more [d] del [s] save  [[] prev []] next  [y] lyrics src")
 _CTRL_VIS_FULL_CLOSE = ("  [p] pause [n] next [↑↓] sel [←→] pg"
-                         " [↵] play [q] quit [l] lyrics [+] more [d] del [s] save  [[] prev []] next")
+                         " [↵] play [q] quit [l] lyrics [+] more [d] del [s] save  [[] prev []] next  [y] lyrics src")
 # compact: symbols only, fits ≤ 80 (panel-closed box)
 _CTRL_VIS_SHORT_OPEN  = "  [p]⏸  [n]⏭  [↑↓]  [←→]  [↵]▶  [q]✕  [L]♪  [+]  [d]✗  [s]↓  [[]←  []]→"
 _CTRL_VIS_SHORT_CLOSE = "  [p]⏸  [n]⏭  [↑↓]  [←→]  [↵]▶  [q]✕  [l]♪  [+]  [d]✗  [s]↓  [[]←  []]→"
@@ -350,7 +350,8 @@ def _ctrl_bar(avail: int, panel_open: bool) -> tuple[str, str]:
         disp = (f"  {_D}[p]{_R} pause {_D}[n]{_R} next {_D}[↑↓]{_R} sel {_D}[←→]{_R} pg"
                 f" {_D}[↵]{_R} play {_D}[q]{_R} quit {Ld} lyrics {_D}[+]{_R} more"
                 f" {_D}[d]{_R} del {_D}[s]{_R} save"
-                f"  {_D}[[]" f"{_R} prev {_D}[]]" f"{_R} next")
+                f"  {_D}[[]" f"{_R} prev {_D}[]]" f"{_R} next"
+                f"  {_D}[y]{_R} lyrics src")
     else:
         vis = vis_short
         disp = (f"  {_D}[p]{_R}⏸  {_D}[n]{_R}⏭  {_D}[↑↓]{_R}  {_D}[←→]{_R}"
@@ -802,7 +803,7 @@ def play_playlist(playlists: list[dict], active_idx: int = 0) -> None:
             title_pad = max(0, lw - _cjk_width(title_vis))
             # Lyric panel lines (with margin animation)
             lrc_idx = _lyric.get("idx")
-            lyric_lines = _lyric_panel_lines(_lrc, lrc_idx, vh, lw,
+            lyric_lines = _lyric_panel_lines(_active_lrc(), lrc_idx, vh, lw,
                                              _lyric["anim_t"], _lyric["mood"])
             ctrl_vis, ctrl_disp = _ctrl_bar(total_iw, True)
             ctrl_pad = max(0, total_iw - _cjk_width(ctrl_vis))
@@ -1010,14 +1011,22 @@ def play_playlist(playlists: list[dict], active_idx: int = 0) -> None:
             _status(f"Loading  {label}")
             ytdlp_proc, mpv_proc = _launch_mpv(tracks[current_idx].youtube_url)
 
-            # Fetch lyrics in background while track loads
+            # Fetch lyrics candidates in background while track loads
             from autoplaylist import lyrics as _lyr
-            _lrc: list[tuple[float, str]] = []
+            _lrc_candidates: list[list[tuple[float, str]]] = []
+            _lrc_idx = [0]     # index into _lrc_candidates (mutable ref)
             _lrc_ready = [False]
 
+            def _active_lrc() -> list[tuple[float, str]]:
+                if _lrc_candidates and _lrc_idx[0] < len(_lrc_candidates):
+                    return _lrc_candidates[_lrc_idx[0]]
+                return []
+
             def _fetch_lyrics(artist: str, title: str) -> None:
-                result = _lyr.fetch_lrc(artist, title)
-                _lrc.clear(); _lrc.extend(result); _lrc_ready[0] = True
+                candidates = _lyr.fetch_candidates(artist, title)
+                _lrc_candidates.clear()
+                _lrc_candidates.extend(candidates)
+                _lrc_ready[0] = True
 
             _t = tracks[current_idx]
             _lrc_thread = threading.Thread(
@@ -1099,6 +1108,7 @@ def play_playlist(playlists: list[dict], active_idx: int = 0) -> None:
                     pos = _get_mpv_pos()
                     if pos is not None:
                         _lyric["pos"] = pos
+                        _lrc = _active_lrc()
                         if _lrc_ready[0] and _lrc:
                             _lyric["line"] = _lyr.current_line(_lrc, pos)
                             # Track current lyric index for the panel
@@ -1120,7 +1130,7 @@ def play_playlist(playlists: list[dict], active_idx: int = 0) -> None:
                 if lyric_panel_on and _panel_widths:
                     _, plw, lw = _panel_widths
                     _lyric["anim_t"] += 1
-                    _draw_lyric_panel(_lrc, _lyric.get("idx"), plw, lw, vh,
+                    _draw_lyric_panel(_active_lrc(), _lyric.get("idx"), plw, lw, vh,
                                       _lyric["anim_t"], _lyric["mood"])
                 sys.stdout.flush()
 
@@ -1208,6 +1218,24 @@ def play_playlist(playlists: list[dict], active_idx: int = 0) -> None:
                         _status(f"Saved  {playlist_name}  [{len(tracks)} tracks]")
                     except Exception as e:
                         _status(f"Save failed: {str(e)[:60]}")
+
+                elif key == "y":
+                    n_cands = len(_lrc_candidates)
+                    if n_cands == 0:
+                        _status("No lyrics available")
+                    elif n_cands == 1:
+                        _status("Lyrics 1/1  (only source)")
+                    else:
+                        _lrc_idx[0] = (_lrc_idx[0] + 1) % n_cands
+                        _lyric["line"] = None
+                        _lyric["off"] = 0
+                        _lyric["idx"] = None
+                        if lyric_panel_on and _panel_widths:
+                            _, plw, lw = _panel_widths
+                            _draw_lyric_panel(_active_lrc(), None, plw, lw, vh,
+                                              _lyric["anim_t"], _lyric["mood"])
+                            sys.stdout.flush()
+                        _status(f"Lyrics {_lrc_idx[0] + 1}/{n_cands}")
 
                 elif key in ("[", "]"):
                     if len(playlists) == 1:

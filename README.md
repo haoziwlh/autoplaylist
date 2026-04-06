@@ -113,6 +113,7 @@ myplaylist new "chill beats" --count 30 --name my-chill-list
 | `0`–`9` + `Enter` | Jump to track by number |
 | `+` | Append ~10 more tracks (background, non-blocking) |
 | `l` | Toggle lyrics panel (time-synced lyrics + mood animation) |
+| `y` | Cycle to next lyrics source (when multiple candidates available) |
 | `[` / `]` | Switch to previous / next playlist |
 | `d` | Delete cursor track from live playlist |
 | `s` | Save current playlist to disk |
@@ -120,7 +121,9 @@ myplaylist new "chill beats" --count 30 --name my-chill-list
 
 ## Lyrics Panel
 
-Press `l` during playback to open a side panel with time-synced lyrics fetched from [lrclib.net](https://lrclib.net). The panel also shows a mood-driven ASCII animation in the margin — determined per track by the LLM (calm, melancholic, energetic, romantic, nostalgic).
+Press `l` during playback to open a side panel with time-synced lyrics. The panel also shows a mood-driven ASCII animation in the margin — determined per track by the LLM (calm, melancholic, energetic, romantic, nostalgic).
+
+Lyrics are fetched in parallel from [lrclib.net](https://lrclib.net) (up to 3 candidates) and [Netease Cloud Music](https://music.163.com) — improving coverage for Chinese music and other tracks not found on lrclib. Press `y` to cycle through available sources; the status bar shows the current source index (e.g. `Lyrics 2/3`).
 
 Requires terminal width ≥ 84 columns.
 
