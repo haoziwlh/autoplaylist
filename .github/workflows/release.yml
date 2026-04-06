@@ -48,3 +48,73 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  update-formula:
+    name: Update Homebrew Formula
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Get version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for PyPI and fetch wheel info
+        id: pypi
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          for i in $(seq 1 10); do
+            echo "Attempt $i: querying PyPI for myplaylist==$VERSION..."
+            response=$(curl -sf "https://pypi.org/pypi/myplaylist/$VERSION/json" || true)
+            if [ -n "$response" ]; then
+              wheel_url=$(echo "$response" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          urls = [u for u in data['urls'] if u['filename'].endswith('-py3-none-any.whl')]
+          print(urls[0]['url'])
+          ")
+              sha256=$(echo "$response" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          urls = [u for u in data['urls'] if u['filename'].endswith('-py3-none-any.whl')]
+          print(urls[0]['digests']['sha256'])
+          ")
+              echo "wheel_url=$wheel_url" >> "$GITHUB_OUTPUT"
+              echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
+              echo "Found: $wheel_url"
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "PyPI package not found after retries" >&2
+          exit 1
+
+      - name: Update Formula
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          WHEEL_URL: ${{ steps.pypi.outputs.wheel_url }}
+          SHA256: ${{ steps.pypi.outputs.sha256 }}
+        run: |
+          sed -i \
+            -e "s|url \"https://files.pythonhosted.org/.*\"|url \"$WHEEL_URL\",|" \
+            -e "s|sha256 \".*\"|sha256 \"$SHA256\"|" \
+            Formula/myplaylist.rb
+          echo "Updated Formula/myplaylist.rb:"
+          cat Formula/myplaylist.rb
+
+      - name: Commit and push Formula update
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/myplaylist.rb
+          git diff --cached --quiet || git commit -m "chore: update Homebrew Formula to v$VERSION"
+          git push origin main
