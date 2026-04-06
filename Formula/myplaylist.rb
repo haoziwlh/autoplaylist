@@ -1,6 +1,4 @@
 class Myplaylist < Formula
-  include Language::Python::Virtualenv
-
   desc "AI-powered music playlist generator and player"
   homepage "https://github.com/haoziwlh/autoplaylist"
   url "https://files.pythonhosted.org/packages/py3/m/myplaylist/myplaylist-0.1.0-py3-none-any.whl",
@@ -11,9 +9,10 @@ class Myplaylist < Formula
   depends_on "python@3.11"
 
   def install
-    venv = virtualenv_create(libexec, "python3.11")
-    venv.pip_install "myplaylist==#{version}"
-    bin.install_symlink libexec/"bin/myplaylist"
+    venv = libexec/"venv"
+    system Formula["python@3.11"].opt_bin/"python3.11", "-m", "venv", venv
+    system venv/"bin/pip", "install", "myplaylist==#{version}"
+    bin.install_symlink venv/"bin/myplaylist"
   end
 
   def caveats
