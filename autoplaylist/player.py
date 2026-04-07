@@ -434,23 +434,28 @@ _CTRL_VIS_SHORT_OPEN  = "  [p]⏸  [n]⏭  [↑↓]  [←→]  [↵]▶  [q]✕ 
 _CTRL_VIS_SHORT_CLOSE = "  [p]⏸  [n]⏭  [↑↓]  [←→]  [↵]▶  [q]✕  [l]♪  [+]  [d]✗  [s]↓  [[]←  []]→"
 
 
-def _ctrl_bar(avail: int, panel_open: bool) -> tuple[str, str]:
+_MODE_ICON = {"seq": "→→", "repeat": "↺", "shuffle": "⇄"}
+
+def _ctrl_bar(avail: int, panel_open: bool, mode: str = "seq") -> tuple[str, str]:
     """Return (ctrl_vis, ctrl_disp) for the control bar, adapting to available width."""
     Ld = f"{_D}[L]{_R}" if panel_open else f"{_D}[l]{_R}"
-    vis_full  = (_CTRL_VIS_FULL_OPEN  if panel_open else _CTRL_VIS_FULL_CLOSE)
-    vis_short = (_CTRL_VIS_SHORT_OPEN if panel_open else _CTRL_VIS_SHORT_CLOSE)
+    icon = _MODE_ICON.get(mode, "→→")
+    vis_full  = (_CTRL_VIS_FULL_OPEN  if panel_open else _CTRL_VIS_FULL_CLOSE) + f"  [r]{icon}"
+    vis_short = (_CTRL_VIS_SHORT_OPEN if panel_open else _CTRL_VIS_SHORT_CLOSE) + f"  [r]{icon}"
     if avail >= _cjk_width(vis_full):
         vis = vis_full
         disp = (f"  {_D}[p]{_R} pause {_D}[n]{_R} next {_D}[↑↓]{_R} sel {_D}[←→]{_R} pg"
                 f" {_D}[↵]{_R} play {_D}[q]{_R} quit {Ld} lyrics {_D}[+]{_R} more"
                 f" {_D}[d]{_R} del {_D}[s]{_R} save"
                 f"  {_D}[[]" f"{_R} prev {_D}[]]" f"{_R} next"
-                f"  {_D}[y]{_R} lyrics src")
+                f"  {_D}[y]{_R} lyrics src"
+                f"  {_D}[r]{_R}{icon}")
     else:
         vis = vis_short
         disp = (f"  {_D}[p]{_R}⏸  {_D}[n]{_R}⏭  {_D}[↑↓]{_R}  {_D}[←→]{_R}"
                 f"  {_D}[↵]{_R}▶  {_D}[q]{_R}✕  {Ld}♪  {_D}[+]{_R}  {_D}[d]{_R}✗  {_D}[s]{_R}↓"
-                f"  {_D}[[]" f"{_R}←  {_D}[]]" f"{_R}→")
+                f"  {_D}[[]" f"{_R}←  {_D}[]]" f"{_R}→"
+                f"  {_D}[r]{_R}{icon}")
     return vis, disp
 
 
@@ -789,6 +794,7 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
     _panel_widths: Optional[tuple[int, int, int]] = None
     _appending = [False]   # True while background append is running
     _switch_tab = [0]      # 0=no switch, -1=prev, +1=next
+    play_mode = "seq"      # "seq" | "repeat" | "shuffle"
 
     # ── viewport helpers ──────────────────────────────────────────────────────
 
@@ -888,7 +894,7 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
             hpad = max(0, _IW_NORMAL - len(lft) - _cjk_width(rgt_vis))
             hdr_vis  = f"{lft}{' ' * hpad}{rgt_vis}"
             hdr_disp = f"  {_B}{_CY}♫ myplaylist{_R}  " + " " * hpad + rgt_disp
-            ctrl_vis, ctrl_disp = _ctrl_bar(_IW_NORMAL, False)
+            ctrl_vis, ctrl_disp = _ctrl_bar(_IW_NORMAL, False, play_mode)
             ctrl_pad  = max(0, _IW_NORMAL - _cjk_width(ctrl_vis))
             lines = [
                 NL,
@@ -932,7 +938,7 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
             lrc_idx = _lyric.get("idx")
             lyric_lines = _lyric_panel_lines(_active_lrc(), lrc_idx, vh, lw,
                                              _lyric["anim_t"], _lyric["mood"])
-            ctrl_vis, ctrl_disp = _ctrl_bar(total_iw, True)
+            ctrl_vis, ctrl_disp = _ctrl_bar(total_iw, True, play_mode)
             ctrl_pad = max(0, total_iw - _cjk_width(ctrl_vis))
             lines = [
                 NL,
@@ -1033,7 +1039,7 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
     hdr_vis0  = f"{lft}{' ' * hpad0}{rgt_vis0}"
     hdr_disp0 = f"  {_B}{_CY}♫ myplaylist{_R}  " + " " * hpad0 + rgt_disp0
 
-    ctrl_vis, ctrl_disp = _ctrl_bar(_IW, False)
+    ctrl_vis, ctrl_disp = _ctrl_bar(_IW, False, play_mode)
     ctrl_pad  = max(0, _IW - _cjk_width(ctrl_vis))
 
     lines = [_NL, _TOP + _NL, _box_row(hdr_vis0, hdr_disp0) + _NL, _MID + _NL]
@@ -1134,7 +1140,7 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                 hdr_vis0  = f"{lft0}{' ' * hpad0}{rgt_vis0}"
                 hdr_disp0 = (f"  {_B}{_CY}♫ myplaylist{_R}  "
                              + " " * hpad0 + rgt_disp0)
-                ctrl_vis, ctrl_disp = _ctrl_bar(_IW, False)
+                ctrl_vis, ctrl_disp = _ctrl_bar(_IW, False, play_mode)
                 ctrl_pad = max(0, _IW - _cjk_width(ctrl_vis))
                 lines = [NL, _TOP + NL, _box_row(hdr_vis0, hdr_disp0) + NL, _MID + NL]
                 for i in range(vh):
@@ -1383,6 +1389,23 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                             sys.stdout.flush()
                         _status(f"Lyrics {_lrc_idx[0] + 1}/{n_cands}")
 
+                elif key == "r":
+                    import random as _random
+                    modes = ["seq", "repeat", "shuffle"]
+                    play_mode = modes[(modes.index(play_mode) + 1) % 3]
+                    if play_mode == "shuffle":
+                        rest = tracks[current_idx + 1:]
+                        _random.shuffle(rest)
+                        tracks[current_idx + 1:] = rest
+                        _redraw_viewport()
+                    mode_names = {"seq": "Sequential →→", "repeat": "Repeat one ↺", "shuffle": "Shuffle ⇄"}
+                    _status(f"Mode: {mode_names[play_mode]}")
+                    if lyric_panel_on and _panel_widths:
+                        _, plw, lw = _panel_widths
+                        _full_repaint(True, plw, lw)
+                    else:
+                        _full_repaint(False, _IW, 0)
+
                 elif key in ("[", "]"):
                     if len(playlists) == 1:
                         _status("Only one playlist")
@@ -1470,6 +1493,11 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                     _status(f"Goto     [{num_buf}]  — add digits or Enter")
 
                 if mpv_proc and mpv_proc.poll() is not None:
+                    if play_mode == "repeat":
+                        # Loop the same track: reset lyric state and restart
+                        _lyric.update({"line": None, "off": 0, "idx": None,
+                                       "pos": None, "mood": "calm", "anim_t": 0})
+                        break
                     old = current_idx; current_idx += 1
                     if current_idx < len(tracks):
                         cursor_idx = current_idx
