@@ -85,50 +85,114 @@ def _ensure_mpv() -> None:
 # 2.3b  LLM backend wizard
 # ---------------------------------------------------------------------------
 
+def _detect_ollama() -> bool:
+    """Return True if Ollama is reachable at localhost:11434."""
+    import urllib.request
+    try:
+        urllib.request.urlopen("http://localhost:11434", timeout=1)
+        return True
+    except Exception:
+        return False
+
+
+def _prompt_api_key(backend_label: str, config_key: str = "llm_api_key") -> str | None:
+    key = Prompt.ask(f"{backend_label} API key").strip()
+    if not key:
+        console.print("[yellow]No key entered. Falling back to Claude CLI.[/yellow]")
+        return None
+    cfg.set_value(config_key, key)
+    return key
 
 
 def _setup_llm() -> None:
     console.print("\n[bold cyan]LLM Backend Setup[/bold cyan]")
+    console.print("myplaylist uses an LLM to generate song recommendations.")
+
+    ollama_detected = _detect_ollama()
+    ollama_tag = "[green](detected ✓)[/green]" if ollama_detected else "[dim](not running — install at ollama.com)[/dim]"
+
     console.print(
-        "myplaylist uses an LLM to generate song recommendations.\n"
-        "Choose a backend:\n"
-        "  [bold][1][/bold] Claude CLI  — uses your Claude Code subscription\n"
-        "  [bold][2][/bold] Gemini API  — Google Gemini API key (free tier available)\n"
+        "\nChoose a backend:\n"
+        "  [bold][1][/bold] Claude       — uses your Claude Code subscription (recommended)\n"
+        "  [bold][2][/bold] Gemini       — Google Gemini API key (free tier available)\n"
+        "  [bold][3][/bold] Groq         — free tier, fast inference (llama3)\n"
+        "  [bold][4][/bold] Qwen         — 通义千问, best for Chinese music (free credits)\n"
+        "  [bold][5][/bold] DeepSeek     — free credits, strong reasoning\n"
+        "  [bold][6][/bold] Kimi         — Moonshot AI, free credits\n"
+        f"  [bold][7][/bold] Ollama       — local, no API key, offline {ollama_tag}\n"
+        "  [bold][8][/bold] Custom       — any OpenAI-compatible endpoint\n"
     )
 
     choice = Prompt.ask("Choice", default="1").strip()
 
     if choice == "2":
-        # Step 1: collect key
         api_key = Prompt.ask("Gemini API key").strip()
         if not api_key:
             console.print("[yellow]No key entered. Falling back to Claude CLI.[/yellow]")
             cfg.set_value("llm_backend", "claude")
             return
-
-        # Step 2: install SDK if needed
-        try:
-            import google.generativeai  # type: ignore  # noqa: F401
-        except ImportError:
-            console.print("[yellow]Installing google-generativeai...[/yellow]")
-            try:
-                subprocess.check_call(
-                    [sys.executable, "-m", "pip", "install", "--quiet", "google-generativeai"]
-                )
-                console.print("[green]✓ google-generativeai installed[/green]")
-            except subprocess.CalledProcessError:
-                console.print(
-                    "[red]Failed to install google-generativeai. "
-                    "Check your network, or run: pip install google-generativeai[/red]"
-                )
-                console.print("[yellow]Falling back to Claude CLI.[/yellow]")
-                cfg.set_value("llm_backend", "claude")
-                return
-
-        # Step 3: save key directly (validated on first actual use)
+        # keep gemini_api_key for backwards compat
         cfg.set_value("llm_backend", "gemini")
         cfg.set_value("gemini_api_key", api_key)
-        console.print("[green]✓ Gemini API key saved. Using gemini-2.5-flash.[/green]")
+        console.print("[green]✓ Gemini configured (gemini-2.5-flash).[/green]")
+
+    elif choice == "3":
+        key = _prompt_api_key("Groq")
+        if not key:
+            cfg.set_value("llm_backend", "claude"); return
+        cfg.set_value("llm_backend", "groq")
+        console.print("[green]✓ Groq configured (llama-3.1-70b-versatile).[/green]")
+
+    elif choice == "4":
+        console.print("Get a free key at: https://dashscope.aliyun.com/")
+        key = _prompt_api_key("Qwen / DashScope")
+        if not key:
+            cfg.set_value("llm_backend", "claude"); return
+        cfg.set_value("llm_backend", "qwen")
+        console.print("[green]✓ Qwen configured (qwen-turbo).[/green]")
+
+    elif choice == "5":
+        console.print("Get a free key at: https://platform.deepseek.com/")
+        key = _prompt_api_key("DeepSeek")
+        if not key:
+            cfg.set_value("llm_backend", "claude"); return
+        cfg.set_value("llm_backend", "deepseek")
+        console.print("[green]✓ DeepSeek configured (deepseek-chat).[/green]")
+
+    elif choice == "6":
+        console.print("Get a free key at: https://platform.moonshot.cn/")
+        key = _prompt_api_key("Kimi / Moonshot")
+        if not key:
+            cfg.set_value("llm_backend", "claude"); return
+        cfg.set_value("llm_backend", "kimi")
+        console.print("[green]✓ Kimi configured (moonshot-v1-8k).[/green]")
+
+    elif choice == "7":
+        if not ollama_detected:
+            console.print(
+                "[yellow]Ollama not detected. Install from https://ollama.com then run "
+                "`ollama pull qwen2.5:7b` before using myplaylist.[/yellow]"
+            )
+        default_model = cfg.get("ollama_model", "qwen2.5:7b")
+        model = Prompt.ask("Ollama model", default=default_model).strip() or default_model
+        cfg.set_value("llm_backend", "ollama")
+        cfg.set_value("ollama_model", model)
+        console.print(f"[green]✓ Ollama configured (model: {model}).[/green]")
+
+    elif choice == "8":
+        endpoint = Prompt.ask("Endpoint URL (e.g. https://api.example.com/v1)").strip()
+        model = Prompt.ask("Model name").strip()
+        api_key = Prompt.ask("API key (press Enter if none)", default="").strip()
+        if not endpoint or not model:
+            console.print("[yellow]Endpoint or model missing. Falling back to Claude CLI.[/yellow]")
+            cfg.set_value("llm_backend", "claude"); return
+        cfg.set_value("llm_backend", "openai-compat")
+        cfg.set_value("openai_compat_endpoint", endpoint)
+        cfg.set_value("llm_model", model)
+        if api_key:
+            cfg.set_value("llm_api_key", api_key)
+        console.print(f"[green]✓ Custom endpoint configured ({endpoint}).[/green]")
+
     else:
         cfg.set_value("llm_backend", "claude")
         console.print("[green]✓ Using Claude CLI.[/green]")

@@ -40,6 +40,20 @@ Examples:
 _TIMEOUT = 30
 _GEMINI_MODEL = "gemini-2.5-flash"
 
+# ---------------------------------------------------------------------------
+# OpenAI-compatible backend presets
+# (base_url, default_model, config_key_for_api_key)
+# None api key config → no key required (Ollama)
+# ---------------------------------------------------------------------------
+_PRESETS: dict[str, tuple[str, str, str | None]] = {
+    "groq":          ("https://api.groq.com/openai/v1",                    "llama-3.1-70b-versatile", "llm_api_key"),
+    "deepseek":      ("https://api.deepseek.com/v1",                        "deepseek-chat",           "llm_api_key"),
+    "qwen":          ("https://dashscope.aliyuncs.com/compatible-mode/v1",  "qwen-turbo",              "llm_api_key"),
+    "kimi":          ("https://api.moonshot.cn/v1",                         "moonshot-v1-8k",          "llm_api_key"),
+    "ollama":        ("http://localhost:11434/v1",                           "qwen2.5:7b",              None),
+    "openai-compat": ("",                                                    "",                        "llm_api_key"),
+}
+
 
 # ---------------------------------------------------------------------------
 # Claude backend
@@ -121,6 +135,78 @@ def _call_gemini(prompt: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# OpenAI-compatible backend (Groq, DeepSeek, Qwen, Kimi, Ollama, custom)
+# ---------------------------------------------------------------------------
+
+def _call_openai_compat(endpoint: str, api_key: str | None, model: str,
+                        system_prompt: str, user_msg: str) -> str:
+    import json as _json
+    import urllib.request
+    import urllib.error
+
+    body = _json.dumps({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": user_msg},
+        ],
+    }).encode()
+
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    req = urllib.request.Request(
+        f"{endpoint.rstrip('/')}/chat/completions",
+        data=body,
+        headers=headers,
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+            data = _json.loads(resp.read())
+        return data["choices"][0]["message"]["content"]
+    except urllib.error.HTTPError as e:
+        body_err = e.read().decode(errors="replace")
+        print(f"LLM API error {e.code}: {body_err[:200]}")
+        return ""
+    except Exception as e:
+        print(f"LLM error ({endpoint}): {e}")
+        return ""
+
+
+def _call_via_preset(backend: str, system_prompt: str, user_msg: str) -> str:
+    """Resolve preset config and call OpenAI-compat endpoint."""
+    preset = _PRESETS.get(backend)
+    if not preset:
+        return ""
+    base_url, default_model, key_cfg = preset
+
+    # openai-compat: endpoint and model come from user config
+    if backend == "openai-compat":
+        base_url = cfg.get("openai_compat_endpoint") or ""
+        default_model = cfg.get("llm_model") or ""
+        if not base_url or not default_model:
+            print("openai-compat backend requires 'openai_compat_endpoint' and 'llm_model' in config.")
+            return ""
+
+    # ollama: model override via ollama_model config key
+    if backend == "ollama":
+        default_model = cfg.get("ollama_model", default_model)
+
+    # allow per-backend model override via llm_model
+    model = cfg.get("llm_model") or default_model
+
+    api_key: str | None = None
+    if key_cfg:
+        api_key = cfg.get(key_cfg)
+        if not api_key:
+            print(f"{backend} backend requires '{key_cfg}' in config. Run `myplaylist setup` to set it.")
+            return ""
+
+    return _call_openai_compat(base_url, api_key, model, system_prompt, user_msg)
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -134,6 +220,8 @@ def parse_prompt(text: str) -> dict[str, Any]:
 
     if backend == "gemini":
         raw = _call_gemini(text)
+    elif backend in _PRESETS:
+        raw = _call_via_preset(backend, _SYSTEM_PROMPT, f"Music description: {text}")
     else:
         raw = _call_claude(text)
 
@@ -186,6 +274,8 @@ def classify_mood(artist: str, title: str) -> str:
     try:
         if backend == "gemini":
             raw = _call_gemini_simple(prompt)
+        elif backend in _PRESETS:
+            raw = _call_via_preset(backend, "You are a music mood classifier.", prompt)
         else:
             raw = _call_claude_simple(prompt)
         word = raw.strip().lower().split()[0] if raw.strip() else ""

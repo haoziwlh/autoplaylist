@@ -20,6 +20,10 @@ def _migrate_if_needed() -> None:
 _DEFAULTS: dict[str, Any] = {
     "llm_backend": "claude",
     "gemini_api_key": None,
+    "llm_api_key": None,
+    "llm_model": None,
+    "ollama_model": "qwen2.5:7b",
+    "openai_compat_endpoint": None,
     "lastfm_key": None,
     "lastfm_secret": None,
     "setup_complete": False,

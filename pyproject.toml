@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "myplaylist"
-version = "0.3.19"
+version = "0.3.20"
 description = "Generate and play music playlists from natural language prompts or seed songs"
 readme = "README.md"
 license = { text = "MIT" }
