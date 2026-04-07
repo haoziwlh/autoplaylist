@@ -67,12 +67,58 @@ def _panel_bot(plw: int, lw: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# yt-dlp path
+# yt-dlp path + browser cookie detection
 # ---------------------------------------------------------------------------
 
 import pathlib
 import re
 import shutil
+
+
+def _find_browser() -> str | None:
+    """Return a browser name for yt-dlp --cookies-from-browser, or None.
+
+    Even when yt-dlp can't decrypt the cookies (e.g. Chrome v10 on macOS),
+    passing --cookies-from-browser changes yt-dlp's client strategy and
+    bypasses YouTube bot-check. Firefox is preferred because its cookies
+    are readable on macOS (plain SQLite, no Keychain). Safari is excluded
+    because macOS sandboxing causes a hard 'Operation not permitted' error.
+    """
+    system = os.uname().sysname
+    if system == "Darwin":
+        candidates = [
+            ("firefox", "/Applications/Firefox.app"),
+            ("chrome",  "/Applications/Google Chrome.app"),
+            ("edge",    "/Applications/Microsoft Edge.app"),
+            ("brave",   "/Applications/Brave Browser.app"),
+            ("chromium","/Applications/Chromium.app"),
+        ]
+        for name, path in candidates:
+            if pathlib.Path(path).exists():
+                return name
+    else:
+        for name, cmd in [
+            ("chrome",   "google-chrome"),
+            ("chrome",   "google-chrome-stable"),
+            ("chromium", "chromium-browser"),
+            ("chromium", "chromium"),
+            ("firefox",  "firefox"),
+            ("edge",     "microsoft-edge"),
+        ]:
+            if shutil.which(cmd):
+                return name
+    return None
+
+
+_browser_cache: str | None | bool = False  # False = not yet probed
+
+
+def _get_browser() -> str | None:
+    global _browser_cache
+    if _browser_cache is False:
+        _browser_cache = _find_browser()
+    return _browser_cache  # type: ignore[return-value]
+
 
 
 def _find_ytdlp() -> str:
@@ -133,15 +179,22 @@ def _launch_mpv(
         ytdlp_stderr = subprocess.DEVNULL
         mpv_stderr = subprocess.DEVNULL
 
+    # Cookie strategy: prefer explicit cookie file, fall back to browser auto-detect.
+    # Even when browser cookies can't be decrypted (e.g. Chrome v10 on macOS),
+    # passing --cookies-from-browser changes yt-dlp's client strategy and
+    # typically bypasses YouTube bot-check.
     from autoplaylist import config as _cfg
     cookie_file = _cfg.get("cookie_file")
-    cookie_args = ["--cookies", cookie_file] if cookie_file and pathlib.Path(cookie_file).exists() else []
+    if cookie_file and pathlib.Path(cookie_file).exists():
+        cookie_args = ["--cookies", cookie_file]
+        cookie_source = f"file:{cookie_file}"
+    else:
+        browser = _get_browser()
+        cookie_args = ["--cookies-from-browser", browser] if browser else []
+        cookie_source = f"browser:{browser}" if browser else "none"
 
-    if debug and cookie_file:
-        log_fh2 = open(_LOG_FILE, "a") if log_fh is None else log_fh
-        log_fh2.write(f"cookies: {cookie_file} ({'found' if pathlib.Path(cookie_file).exists() else 'NOT FOUND'})\n")
-        if log_fh is None:
-            log_fh2.close()
+    if debug and log_fh:
+        log_fh.write(f"cookies: {cookie_source}\n")
 
     ytdlp_proc = subprocess.Popen(
         [ytdlp_path, "-f", "bestaudio/best", "-o", "-", "--no-playlist"]
@@ -685,7 +738,8 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
     if debug:
         _LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
         print(f"[debug] player log: {_LOG_FILE}")
-        print(f"[debug] yt-dlp: {_find_ytdlp()}")
+        print(f"[debug] yt-dlp:   {_find_ytdlp()}")
+        print(f"[debug] browser:  {_get_browser() or 'none detected'}")
 
     # Unpack active playlist
     playlist_name: str = playlists[active_idx]["name"]
