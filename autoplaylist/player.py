@@ -620,11 +620,11 @@ def _draw_lyric_panel(
     col_offset = plw + 2
     buf = []
     for rel in range(vh):
-        lines_up = 3 + vh - rel
+        lu = 3 + vh - rel
         buf.append(
-            f"\033[s\033[{lines_up}A\r\033[{col_offset}C"
+            f"\033[{lu}A\r\033[{col_offset}C"
             f"{lyric_lines[rel]}"
-            f"\033[u"
+            f"\033[{lu}B\r"
         )
     sys.stdout.write("".join(buf))
     sys.stdout.flush()
@@ -823,7 +823,11 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
             vis  = _track_inner_vis(idx, playing, cursored, tracks, ll, lo, False)
             disp = _track_inner_disp(idx, playing, is_paused, cursored, tracks, ll, lo, False)
             row = _box_row(vis, disp)
-        sys.stdout.write(f"\033[s\033[{_lines_up(rel)}A\r{row}\033[u")
+        # Use up/down instead of save/restore cursor (\033[s/\033[u) — Terminal.app
+        # does not always implement save/restore reliably, causing rows to be drawn
+        # outside the box after multiple operations.
+        lu = _lines_up(rel)
+        sys.stdout.write(f"\033[{lu}A\r{row}\033[{lu}B\r")
 
     def _redraw_viewport() -> None:
         """Redraw all visible track rows in place."""
@@ -862,9 +866,7 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
         hdr_vis  = f"{lft}{' ' * hpad}{rgt_vis}"
         hdr_disp = f"  {_B}{_CY}♫ myplaylist{_R}  " + " " * hpad + rgt_disp
         lines_up = 3 + vh + 2   # up: _BOT, ctrl, mid, vh tracks, mid, header
-        sys.stdout.write(
-            f"\033[s\033[{lines_up}A\r{_box_row(hdr_vis, hdr_disp)}\033[u"
-        )
+        sys.stdout.write(f"\033[{lines_up}A\r{_box_row(hdr_vis, hdr_disp)}\033[{lines_up}B\r")
         sys.stdout.flush()
 
     def _full_repaint(panel_open: bool, plw: int, lw: int) -> None:
@@ -980,7 +982,7 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
         content = f"{title_str}{' ' * title_pad}"
         lines_up = 3 + vh + 2  # bot + ctrl + panel_bot + vh tracks + mid + header
         col_offset = plw + 2   # right column starts after │plw│
-        sys.stdout.write(f"\033[s\033[{lines_up}A\r\033[{col_offset}C{content}\033[u")
+        sys.stdout.write(f"\033[{lines_up}A\r\033[{col_offset}C{content}\033[{lines_up}B\r")
         sys.stdout.flush()
 
     def _do_append() -> None:
