@@ -1493,11 +1493,17 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                     # Clear cached lyrics for current track and re-fetch
                     _t = tracks[current_idx]
                     from autoplaylist import cache as _cache
-                    _cache.save_lyrics(_t.artist, _t.title, [])  # clear by saving empty
+                    _cache.save_lyrics(_t.artist, _t.title, [])
                     _lrc_candidates.clear()
                     _lrc_ready[0] = False
                     _lrc_idx[0] = 0
-                    _lyric["line"] = None; _lyric["off"] = 0; _lyric["idx"] = None
+                    _lyric.update({"line": None, "off": 0, "idx": None})
+                    # Immediately blank the lyrics panel
+                    if lyric_panel_on and _panel_widths:
+                        _, plw, lw = _panel_widths
+                        _draw_lyric_panel([], None, plw, lw, vh,
+                                          _lyric["anim_t"], _lyric["mood"])
+                        sys.stdout.flush()
                     _status("Refreshing lyrics…")
                     _lrc_thread2 = threading.Thread(
                         target=_fetch_lyrics, args=(_t.artist, _t.title), daemon=True
