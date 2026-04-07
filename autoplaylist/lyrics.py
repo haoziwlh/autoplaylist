@@ -240,7 +240,6 @@ def fetch_candidates(artist: str, title: str) -> list[list[tuple[float, str]]]:
     lrclib_result = results.get("lrclib")
     if isinstance(lrclib_result, list):
         if lrclib_result and isinstance(lrclib_result[0], list):
-            # _fetch_lrclib_candidates returns list of lists
             for c in lrclib_result:
                 fp = _fingerprint(c)
                 if fp not in seen:
@@ -259,6 +258,18 @@ def fetch_candidates(artist: str, title: str) -> list[list[tuple[float, str]]]:
             if fp not in seen:
                 seen.add(fp)
                 candidates.append(c)
+
+    # Fallback: if few results and artist is set, retry lrclib with title only
+    # (helps when artist name uses variant chars, e.g. 海來阿木 vs 海来阿木)
+    if len(candidates) < 2 and artist and title:
+        extra = _fetch_lrclib_candidates("", title)
+        if isinstance(extra, list):
+            for c in (extra if extra and isinstance(extra[0], list) else [extra] if extra else []):
+                if c:
+                    fp = _fingerprint(c)
+                    if fp not in seen:
+                        seen.add(fp)
+                        candidates.append(c)
 
     return candidates
 
