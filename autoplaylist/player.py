@@ -1390,21 +1390,15 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                         _status(f"Lyrics {_lrc_idx[0] + 1}/{n_cands}")
 
                 elif key == "r":
-                    import random as _random
                     modes = ["seq", "repeat", "shuffle"]
                     play_mode = modes[(modes.index(play_mode) + 1) % 3]
-                    if play_mode == "shuffle":
-                        rest = tracks[current_idx + 1:]
-                        _random.shuffle(rest)
-                        tracks[current_idx + 1:] = rest
-                        _redraw_viewport()
                     mode_names = {"seq": "Sequential →→", "repeat": "Repeat one ↺", "shuffle": "Shuffle ⇄"}
-                    _status(f"Mode: {mode_names[play_mode]}")
                     if lyric_panel_on and _panel_widths:
                         _, plw, lw = _panel_widths
                         _full_repaint(True, plw, lw)
                     else:
                         _full_repaint(False, _IW, 0)
+                    _status(f"Mode: {mode_names[play_mode]}")
 
                 elif key in ("[", "]"):
                     if len(playlists) == 1:
@@ -1498,7 +1492,13 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                         _lyric.update({"line": None, "off": 0, "idx": None,
                                        "pos": None, "mood": "calm", "anim_t": 0})
                         break
-                    old = current_idx; current_idx += 1
+                    old = current_idx
+                    if play_mode == "shuffle" and len(tracks) > 1:
+                        import random as _random
+                        candidates = [i for i in range(len(tracks)) if i != current_idx]
+                        current_idx = _random.choice(candidates)
+                    else:
+                        current_idx += 1
                     if current_idx < len(tracks):
                         cursor_idx = current_idx
                         if _scroll_to(current_idx):
