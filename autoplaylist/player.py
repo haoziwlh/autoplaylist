@@ -133,8 +133,20 @@ def _launch_mpv(
         ytdlp_stderr = subprocess.DEVNULL
         mpv_stderr = subprocess.DEVNULL
 
+    from autoplaylist import config as _cfg
+    cookie_file = _cfg.get("cookie_file")
+    cookie_args = ["--cookies", cookie_file] if cookie_file and pathlib.Path(cookie_file).exists() else []
+
+    if debug and cookie_file:
+        log_fh2 = open(_LOG_FILE, "a") if log_fh is None else log_fh
+        log_fh2.write(f"cookies: {cookie_file} ({'found' if pathlib.Path(cookie_file).exists() else 'NOT FOUND'})\n")
+        if log_fh is None:
+            log_fh2.close()
+
     ytdlp_proc = subprocess.Popen(
-        [ytdlp_path, "-f", "bestaudio/best", "-o", "-", "--no-playlist", youtube_url]
+        [ytdlp_path, "-f", "bestaudio/best", "-o", "-", "--no-playlist"]
+        + cookie_args
+        + [youtube_url]
         + ([] if debug else ["--quiet"]),
         stdout=subprocess.PIPE,
         stderr=ytdlp_stderr,
