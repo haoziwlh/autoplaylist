@@ -1505,8 +1505,15 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                                           _lyric["anim_t"], _lyric["mood"])
                         sys.stdout.flush()
                     _status("Refreshing lyrics…")
+                    def _refresh_and_notify(artist: str, title: str) -> None:
+                        _fetch_lyrics(artist, title)
+                        n = len(_lrc_candidates)
+                        if n > 0:
+                            _status(f"Lyrics {n} source(s) found — press [y] to cycle")
+                        else:
+                            _status("No lyrics found for this track")
                     _lrc_thread2 = threading.Thread(
-                        target=_fetch_lyrics, args=(_t.artist, _t.title), daemon=True
+                        target=_refresh_and_notify, args=(_t.artist, _t.title), daemon=True
                     )
                     _lrc_thread2.start()
 
