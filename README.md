@@ -129,7 +129,50 @@ Requires terminal width ≥ 84 columns.
 
 ## Last.fm (optional)
 
-Last.fm integration improves similar-song quality. Get a free API key at <https://www.last.fm/api/account/create> and enter it during `myplaylist setup`. You can skip this and run in yt-dlp-only mode.
+Last.fm integration improves similar-song quality — without it, myplaylist falls back to yt-dlp search only.
+
+**Getting a free API key:**
+
+1. Go to <https://www.last.fm/api/account/create> (create a Last.fm account first if needed)
+2. Fill in any values for Application name / description (e.g. `myplaylist` / `personal use`)
+3. Leave Callback URL blank, submit
+4. Copy the **API key** and **Shared secret** from the confirmation page
+
+**Saving the key:**
+
+```bash
+myplaylist config --lastfm-key <API key> --lastfm-secret <shared secret>
+```
+
+Or re-run setup and enter them interactively:
+
+```bash
+myplaylist setup
+```
+
+## Troubleshooting
+
+**Playback stuck on "Loading" / tracks all skipped**
+
+YouTube occasionally requires authentication for certain IPs. myplaylist automatically tries to use cookies from your browser (Chrome, Firefox, Edge, or Brave) to work around this. If you still have issues:
+
+1. Run with `--debug` to see what's happening:
+   ```bash
+   myplaylist play --debug
+   cat ~/.myplaylist/player.log
+   ```
+2. If the log shows `Sign in to confirm you're not a bot`, export a `cookies.txt` file from your browser using an extension such as [Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc) (Chrome) or [cookies.txt](https://addons.mozilla.org/firefox/addon/cookies-txt/) (Firefox), then:
+   ```bash
+   myplaylist config --cookie-file ~/cookies.txt
+   ```
+
+**`myplaylist` command not found after install**
+
+Open a new terminal, or run:
+```bash
+source ~/.zshrc   # macOS / zsh
+source ~/.bashrc  # Linux / bash
+```
 
 ## Data Storage
 
