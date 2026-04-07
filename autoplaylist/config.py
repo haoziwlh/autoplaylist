@@ -23,6 +23,7 @@ _DEFAULTS: dict[str, Any] = {
     "lastfm_key": None,
     "lastfm_secret": None,
     "setup_complete": False,
+    "cookie_file": None,
 }
 
 

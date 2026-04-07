@@ -110,6 +110,7 @@ def delete(name: str = typer.Argument(..., help="Playlist name")) -> None:
 def config(
     lastfm_key: Optional[str] = typer.Option(None, "--lastfm-key", help="Set Last.fm API key"),
     lastfm_secret: Optional[str] = typer.Option(None, "--lastfm-secret", help="Set Last.fm API secret"),
+    cookie_file: Optional[str] = typer.Option(None, "--cookie-file", help="Path to cookies.txt for yt-dlp (fixes YouTube bot check)"),
     show: bool = typer.Option(False, "--show", help="Show current config"),
 ) -> None:
     """View or update configuration (Last.fm API key etc.)."""
@@ -122,12 +123,20 @@ def config(
     if lastfm_secret:
         cfg.set_value("lastfm_secret", lastfm_secret)
         c.print(f"[green]✓ Last.fm API secret saved[/green]")
-    if show or (not lastfm_key and not lastfm_secret):
+    if cookie_file is not None:
+        cfg.set_value("cookie_file", cookie_file or None)
+        if cookie_file:
+            c.print(f"[green]✓ Cookie file saved: {cookie_file}[/green]")
+        else:
+            c.print(f"[green]✓ Cookie file cleared[/green]")
+    if show or not any([lastfm_key, lastfm_secret, cookie_file is not None]):
         current = cfg.load()
         key = current.get("lastfm_key") or "(not set)"
         secret = current.get("lastfm_secret") or "(not set)"
+        cookies = current.get("cookie_file") or "(not set)"
         c.print(f"lastfm_key:    {key}")
         c.print(f"lastfm_secret: {secret}")
+        c.print(f"cookie_file:   {cookies}")
         c.print(f"setup_complete: {current.get('setup_complete')}")
 
 
