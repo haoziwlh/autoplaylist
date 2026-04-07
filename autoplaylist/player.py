@@ -312,6 +312,8 @@ def _marquee(text: str, width: int, offset: int) -> str:
 
 def _restore_terminal() -> None:
     """Fully reset terminal to sane state (undo tty.setraw)."""
+    sys.stdout.write("\033[?7h")  # re-enable auto-wrap
+    sys.stdout.flush()
     try:
         subprocess.run(["stty", "sane"], check=False, stderr=subprocess.DEVNULL)
     except Exception:
@@ -658,9 +660,11 @@ def _lyric_label(artist: str, lyric: str, off: int) -> str:
 
 def _track_inner_vis(i: int, playing: bool, cursored: bool, tracks: list[Track],
                      lyric_line: Optional[str] = None, lyric_off: int = 0,
-                     panel_open: bool = False, label_width: int = _LABEL_W,
+                     panel_open: bool = False, label_width: int = -1,
                      pos: Optional[float] = None, duration: float = 0) -> str:
     """Visible text (no ANSI) for a track row."""
+    if label_width < 0:
+        label_width = _LABEL_W
     num = "▶" if playing else ("›" if cursored else str(i + 1))
     if playing and panel_open and pos is not None and duration > 0:
         # Progress bar stretches to fill available label space
@@ -683,9 +687,11 @@ def _track_inner_vis(i: int, playing: bool, cursored: bool, tracks: list[Track],
 
 def _track_inner_disp(i: int, playing: bool, paused: bool, cursored: bool, tracks: list[Track],
                       lyric_line: Optional[str] = None, lyric_off: int = 0,
-                      panel_open: bool = False, label_width: int = _LABEL_W,
+                      panel_open: bool = False, label_width: int = -1,
                       pos: Optional[float] = None, duration: float = 0) -> str:
     """Display text (with ANSI) for a track row."""
+    if label_width < 0:
+        label_width = _LABEL_W
     num = "▶" if playing else ("›" if cursored else str(i + 1))
     if playing and panel_open and pos is not None and duration > 0:
         time_str = f"{_fmt_dur(int(pos))}/{_fmt_dur(int(duration))}"
@@ -714,8 +720,10 @@ def _track_inner_disp(i: int, playing: bool, paused: bool, cursored: bool, track
         return f"  {_D}{num:>3}{_R}  {label}  {dur_s}   "
 
 
-def _box_row(vis: str, disp: str, inner_width: int = _IW) -> str:
+def _box_row(vis: str, disp: str, inner_width: int = -1) -> str:
     """Wrap content in │...│, padding to inner_width display cols."""
+    if inner_width < 0:
+        inner_width = _IW
     vis_dw = _cjk_width(vis)
     pad = max(0, inner_width - vis_dw)
     return f"│{disp}{' ' * pad}│"
@@ -749,6 +757,25 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
     if not tracks:
         print("Playlist is empty.")
         return
+
+    # ── Adapt box to terminal width ───────────────────────────────────────────
+    # _IW=80 means each row is 82 cols (│ + 80 + │). In the default macOS
+    # Terminal (80 cols) rows wrap, corrupting cursor-position tracking.
+    # Detect actual width, shrink the box to fit, and disable auto-wrap as
+    # a safety net so stray long strings never break the layout.
+    global _IW, _LABEL_W, _TOP, _MID, _BOT
+    try:
+        term_cols = os.get_terminal_size().columns
+    except OSError:
+        term_cols = 80
+    # Inner width: leave 2 cols for the │ borders; floor at 60 for usability
+    _IW = min(_IW_NORMAL, max(60, term_cols - 2))
+    _LABEL_W = _IW - 20   # track row = 20 fixed cols + label
+    _TOP = "┌" + "─" * _IW + "┐"
+    _MID = "├" + "─" * _IW + "┤"
+    _BOT = "└" + "─" * _IW + "┘"
+    sys.stdout.write("\033[?7l")   # disable terminal auto-wrap for TUI session
+    sys.stdout.flush()
 
     n = len(tracks)
     vh = min(_VIEW_H, n)   # actual viewport height
