@@ -156,10 +156,22 @@ def _find_ytdlp() -> str:
 _LOG_FILE = pathlib.Path.home() / ".myplaylist" / "player.log"
 
 
+def _video_id(url: str) -> str | None:
+    """Extract YouTube video ID from a watch or short URL."""
+    import re as _re
+    m = _re.search(r"[?&]v=([A-Za-z0-9_-]{11})", url)
+    if m:
+        return m.group(1)
+    m = _re.search(r"youtu\.be/([A-Za-z0-9_-]{11})", url)
+    if m:
+        return m.group(1)
+    return None
+
+
 def _launch_mpv(
     youtube_url: str,
     debug: bool = False,
-) -> tuple[subprocess.Popen, subprocess.Popen]:
+) -> tuple[subprocess.Popen | None, subprocess.Popen]:
     if os.path.exists(_IPC_SOCK):
         os.unlink(_IPC_SOCK)
     ytdlp_path = _find_ytdlp()
@@ -179,10 +191,6 @@ def _launch_mpv(
         ytdlp_stderr = subprocess.DEVNULL
         mpv_stderr = subprocess.DEVNULL
 
-    # Cookie strategy: prefer explicit cookie file, fall back to browser auto-detect.
-    # Even when browser cookies can't be decrypted (e.g. Chrome v10 on macOS),
-    # passing --cookies-from-browser changes yt-dlp's client strategy and
-    # typically bypasses YouTube bot-check.
     from autoplaylist import config as _cfg
     cookie_file = _cfg.get("cookie_file")
     if cookie_file and pathlib.Path(cookie_file).exists():
@@ -196,6 +204,32 @@ def _launch_mpv(
     if debug and log_fh:
         log_fh.write(f"cookies: {cookie_source}\n")
 
+    # ── cache check ──────────────────────────────────────────────────────────
+    from autoplaylist import cache as _cache
+    _cache_enabled = int(_cfg.get("cache_max_mb", 500)) > 0
+    vid = _video_id(youtube_url) if _cache_enabled else None
+    cached = _cache.get_cached_audio(vid) if vid else None
+
+    if cached:
+        if debug and log_fh:
+            log_fh.write(f"cache:  HIT {cached}\n")
+            log_fh.flush()
+        _cache.touch_audio(vid)
+        mpv_proc = subprocess.Popen(
+            ["mpv", "--no-video", f"--input-ipc-server={_IPC_SOCK}", str(cached)]
+            + ([] if debug else ["--really-quiet"]),
+            stdout=log_fh if debug else subprocess.DEVNULL,
+            stderr=mpv_stderr,
+        )
+        if log_fh:
+            log_fh.close()
+        return None, mpv_proc
+
+    # ── stream (+ background cache write) ───────────────────────────────────
+    if debug and log_fh:
+        log_fh.write(f"cache:  MISS — streaming\n")
+        log_fh.flush()
+
     ytdlp_proc = subprocess.Popen(
         [ytdlp_path, "-f", "bestaudio/best", "-o", "-", "--no-playlist"]
         + cookie_args
@@ -204,15 +238,67 @@ def _launch_mpv(
         stdout=subprocess.PIPE,
         stderr=ytdlp_stderr,
     )
-    mpv_proc = subprocess.Popen(
-        ["mpv", "--no-video", f"--input-ipc-server={_IPC_SOCK}", "-"]
-        + ([] if debug else ["--really-quiet"]),
-        stdin=ytdlp_proc.stdout,
-        stdout=log_fh if debug else subprocess.DEVNULL,
-        stderr=mpv_stderr,
-    )
-    if ytdlp_proc.stdout:
-        ytdlp_proc.stdout.close()
+
+    if vid:
+        # Tee: write to cache file while simultaneously feeding mpv via pipe
+        _cache._ensure_dirs()
+        tmp_path  = _cache.tmp_audio_path(vid)
+        final_path = _cache.audio_path(vid)
+        r_fd, w_fd = os.pipe()
+
+        def _tee_worker() -> None:
+            try:
+                with open(tmp_path, "wb") as f:
+                    while True:
+                        data = ytdlp_proc.stdout.read(65536)
+                        if not data:
+                            break
+                        f.write(data)
+                        try:
+                            os.write(w_fd, data)
+                        except OSError:
+                            break  # mpv was killed; stop writing
+            except Exception:
+                pass
+            finally:
+                try:
+                    os.close(w_fd)
+                except OSError:
+                    pass
+            # Finalise: rename if complete, else discard
+            try:
+                if tmp_path.exists() and tmp_path.stat().st_size >= _cache._MIN_AUDIO_BYTES:
+                    tmp_path.rename(final_path)
+                    _cache.evict_audio_if_needed()
+                else:
+                    tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+        import threading as _threading
+        _threading.Thread(target=_tee_worker, daemon=True).start()
+
+        r_file = os.fdopen(r_fd, "rb")
+        mpv_proc = subprocess.Popen(
+            ["mpv", "--no-video", f"--input-ipc-server={_IPC_SOCK}", "-"]
+            + ([] if debug else ["--really-quiet"]),
+            stdin=r_file,
+            stdout=log_fh if debug else subprocess.DEVNULL,
+            stderr=mpv_stderr,
+        )
+        r_file.close()  # parent no longer needs read end; mpv inherited it
+        # NOTE: do NOT close ytdlp_proc.stdout here; tee_worker reads from it
+    else:
+        mpv_proc = subprocess.Popen(
+            ["mpv", "--no-video", f"--input-ipc-server={_IPC_SOCK}", "-"]
+            + ([] if debug else ["--really-quiet"]),
+            stdin=ytdlp_proc.stdout,
+            stdout=log_fh if debug else subprocess.DEVNULL,
+            stderr=mpv_stderr,
+        )
+        if ytdlp_proc.stdout:
+            ytdlp_proc.stdout.close()
+
     if log_fh:
         log_fh.close()
     return ytdlp_proc, mpv_proc
@@ -1175,9 +1261,14 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                 return []
 
             def _fetch_lyrics(artist: str, title: str) -> None:
-                candidates = _lyr.fetch_candidates(artist, title)
+                from autoplaylist import cache as _cache
+                candidates = _cache.get_lyrics(artist, title)
+                if candidates is None:
+                    candidates = _lyr.fetch_candidates(artist, title)
+                    if candidates:
+                        _cache.save_lyrics(artist, title, candidates)
                 _lrc_candidates.clear()
-                _lrc_candidates.extend(candidates)
+                _lrc_candidates.extend(candidates or [])
                 _lrc_ready[0] = True
 
             _t = tracks[current_idx]

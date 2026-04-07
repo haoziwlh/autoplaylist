@@ -111,6 +111,7 @@ def config(
     lastfm_key: Optional[str] = typer.Option(None, "--lastfm-key", help="Set Last.fm API key"),
     lastfm_secret: Optional[str] = typer.Option(None, "--lastfm-secret", help="Set Last.fm API secret"),
     cookie_file: Optional[str] = typer.Option(None, "--cookie-file", help="Path to cookies.txt for yt-dlp (fixes YouTube bot check)"),
+    cache_max_mb: Optional[int] = typer.Option(None, "--cache-max-mb", help="Max audio cache size in MB (default 500, 0 = disable)"),
     show: bool = typer.Option(False, "--show", help="Show current config"),
 ) -> None:
     """View or update configuration (Last.fm API key etc.)."""
@@ -129,7 +130,13 @@ def config(
             c.print(f"[green]✓ Cookie file saved: {cookie_file}[/green]")
         else:
             c.print(f"[green]✓ Cookie file cleared[/green]")
-    if show or not any([lastfm_key, lastfm_secret, cookie_file is not None]):
+    if cache_max_mb is not None:
+        cfg.set_value("cache_max_mb", cache_max_mb)
+        if cache_max_mb == 0:
+            c.print("[green]✓ Audio cache disabled[/green]")
+        else:
+            c.print(f"[green]✓ Audio cache limit set to {cache_max_mb} MB[/green]")
+    if show or not any([lastfm_key, lastfm_secret, cookie_file is not None, cache_max_mb is not None]):
         current = cfg.load()
         key = current.get("lastfm_key") or "(not set)"
         secret = current.get("lastfm_secret") or "(not set)"
@@ -137,7 +144,33 @@ def config(
         c.print(f"lastfm_key:    {key}")
         c.print(f"lastfm_secret: {secret}")
         c.print(f"cookie_file:   {cookies}")
+        c.print(f"cache_max_mb:  {current.get('cache_max_mb', 500)} MB")
         c.print(f"setup_complete: {current.get('setup_complete')}")
+
+
+@app.command()
+def cache(
+    clear: bool = typer.Option(False, "--clear", help="Delete all cached audio and lyrics"),
+    clear_audio: bool = typer.Option(False, "--clear-audio", help="Delete cached audio only"),
+    clear_lyrics: bool = typer.Option(False, "--clear-lyrics", help="Delete cached lyrics only"),
+) -> None:
+    """Show or clear the local audio/lyrics cache (~/.myplaylist/cache/)."""
+    from autoplaylist import cache as _cache
+    from rich.console import Console
+    c = Console()
+
+    if clear or clear_audio:
+        n = _cache.clear_audio()
+        c.print(f"[green]✓ Deleted {n} cached audio file(s)[/green]")
+    if clear or clear_lyrics:
+        n = _cache.clear_lyrics()
+        c.print(f"[green]✓ Deleted {n} cached lyrics file(s)[/green]")
+    if not (clear or clear_audio or clear_lyrics):
+        st = _cache.stats()
+        mb = st["audio_bytes"] / (1024 * 1024)
+        c.print(f"Audio:  {st['audio_files']} files  ({mb:.1f} MB)")
+        c.print(f"Lyrics: {st['lyrics_files']} files")
+        c.print(f"Path:   {_cache._CACHE_DIR}")
 
 
 @app.command()

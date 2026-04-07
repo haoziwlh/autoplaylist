@@ -24,6 +24,7 @@ _DEFAULTS: dict[str, Any] = {
     "lastfm_secret": None,
     "setup_complete": False,
     "cookie_file": None,
+    "cache_max_mb": 500,
 }
 
 
