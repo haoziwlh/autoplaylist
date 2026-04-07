@@ -74,6 +74,48 @@ import pathlib
 import re
 import shutil
 
+def _find_browser() -> str | None:
+    """Return the first available browser name for yt-dlp --cookies-from-browser, or None."""
+    system = os.uname().sysname  # 'Darwin' or 'Linux'
+    candidates: list[tuple[str, str]] = []  # (yt-dlp browser name, check path or command)
+
+    if system == "Darwin":
+        candidates = [
+            ("chrome",  "/Applications/Google Chrome.app"),
+            ("chromium","Applications/Chromium.app"),
+            ("firefox", "/Applications/Firefox.app"),
+            ("edge",    "/Applications/Microsoft Edge.app"),
+            ("brave",   "/Applications/Brave Browser.app"),
+            ("safari",  "/Applications/Safari.app"),
+        ]
+        for name, path in candidates:
+            if pathlib.Path(path).exists():
+                return name
+    else:
+        candidates = [
+            ("chrome",   "google-chrome"),
+            ("chrome",   "google-chrome-stable"),
+            ("chromium", "chromium-browser"),
+            ("chromium", "chromium"),
+            ("firefox",  "firefox"),
+            ("edge",     "microsoft-edge"),
+        ]
+        for name, cmd in candidates:
+            if shutil.which(cmd):
+                return name
+    return None
+
+
+_browser_cache: str | None | bool = False  # False = not yet checked
+
+
+def _get_browser() -> str | None:
+    global _browser_cache
+    if _browser_cache is False:
+        _browser_cache = _find_browser()
+    return _browser_cache  # type: ignore[return-value]
+
+
 def _find_ytdlp() -> str:
     def _version(path: str) -> tuple:
         try:
@@ -117,6 +159,9 @@ def _launch_mpv(
         os.unlink(_IPC_SOCK)
     ytdlp_path = _find_ytdlp()
 
+    browser = _get_browser()
+    cookie_args = ["--cookies-from-browser", browser] if browser else []
+
     if debug:
         _LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
         log_fh = open(_LOG_FILE, "a")
@@ -124,6 +169,7 @@ def _launch_mpv(
         log_fh.write(f"\n--- {datetime.datetime.now().isoformat()} ---\n")
         log_fh.write(f"yt-dlp: {ytdlp_path}\n")
         log_fh.write(f"url:    {youtube_url}\n")
+        log_fh.write(f"browser cookies: {browser or 'none'}\n")
         log_fh.flush()
         ytdlp_stderr = log_fh
         mpv_stderr = log_fh
@@ -133,7 +179,9 @@ def _launch_mpv(
         mpv_stderr = subprocess.DEVNULL
 
     ytdlp_proc = subprocess.Popen(
-        [ytdlp_path, "-f", "bestaudio/best", "-o", "-", "--no-playlist", youtube_url]
+        [ytdlp_path, "-f", "bestaudio/best", "-o", "-", "--no-playlist"]
+        + cookie_args
+        + [youtube_url]
         + ([] if debug else ["--quiet"]),
         stdout=subprocess.PIPE,
         stderr=ytdlp_stderr,
@@ -673,6 +721,7 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
         _LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
         print(f"[debug] player log: {_LOG_FILE}")
         print(f"[debug] yt-dlp: {_find_ytdlp()}")
+        print(f"[debug] browser cookies: {_get_browser() or 'none detected'}")
 
     # Unpack active playlist
     playlist_name: str = playlists[active_idx]["name"]
