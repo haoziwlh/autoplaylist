@@ -11,6 +11,41 @@ from typing import Optional
 _TIMEOUT = 6
 
 # ---------------------------------------------------------------------------
+# Traditional → Simplified Chinese normalisation (no external deps)
+# Covers characters commonly appearing in Chinese music artist/song names.
+# ---------------------------------------------------------------------------
+_T2S_MAP = {
+    # Most frequent traditional→simplified pairs in music metadata
+    '來': '来', '後': '后', '說': '说', '這': '这', '們': '们', '沒': '没',
+    '點': '点', '還': '还', '歷': '历', '經': '经', '發': '发', '關': '关',
+    '從': '从', '學': '学', '實': '实', '產': '产', '業': '业', '無': '无',
+    '兩': '两', '認': '认', '給': '给', '處': '处', '邊': '边', '報': '报',
+    '達': '达', '決': '决', '製': '制', '開': '开', '動': '动', '務': '务',
+    '間': '间', '觀': '观', '機': '机', '畫': '画', '帶': '带', '費': '费',
+    '義': '义', '書': '书', '難': '难', '傳': '传', '觸': '触', '視': '视',
+    '話': '话', '讓': '让', '雖': '虽', '強': '强', '隊': '队', '遠': '远',
+    '總': '总', '種': '种', '類': '类', '龍': '龙', '鳳': '凤', '鳥': '鸟',
+    '魂': '魂', '夢': '梦', '樹': '树', '橋': '桥', '樓': '楼', '詞': '词',
+    '聲': '声', '調': '调', '節': '节', '電': '电', '語': '语', '愛': '爱',
+    '離': '离', '別': '别', '懷': '怀', '舊': '旧', '憶': '忆', '戀': '恋',
+    '纏': '缠', '緣': '缘', '緒': '绪', '紅': '红', '絲': '丝', '彈': '弹',
+    '聽': '听', '唱': '唱', '歌': '歌', '曲': '曲', '音': '音', '樂': '乐',
+    '風': '风', '雲': '云', '雨': '雨', '雪': '雪', '月': '月', '陽': '阳',
+    '燈': '灯', '燭': '烛', '煙': '烟', '霧': '雾', '塵': '尘', '淚': '泪',
+    '歲': '岁', '時': '时', '長': '长', '個': '个', '國': '国', '為': '为',
+    '會': '会', '樣': '样', '問': '问', '題': '题', '對': '对', '與': '与',
+    '進': '进', '現': '现', '際': '际', '極': '极', '則': '则', '較': '较',
+    '繼': '继', '續': '续', '變': '变', '壞': '坏', '壯': '壮', '飛': '飞',
+    '鷹': '鹰', '鶯': '莺', '燕': '燕', '鵬': '鹏', '馬': '马', '魚': '鱼',
+}
+_T2S_TABLE = str.maketrans(_T2S_MAP)
+
+
+def _to_simplified(s: str) -> str:
+    """Best-effort traditional→simplified conversion for lyrics search queries."""
+    return s.translate(_T2S_TABLE)
+
+# ---------------------------------------------------------------------------
 # LRC parser (shared)
 # ---------------------------------------------------------------------------
 
@@ -223,10 +258,13 @@ def fetch_candidates(artist: str, title: str) -> list[list[tuple[float, str]]]:
         except Exception:
             pass
 
+    artist_s = _to_simplified(artist)
+    title_s  = _to_simplified(title)
+
     threads = [
-        threading.Thread(target=_fetch, args=("lrclib", _fetch_lrclib_candidates, artist, title), daemon=True),
-        threading.Thread(target=_fetch, args=("netease", fetch_netease, artist, title), daemon=True),
-        threading.Thread(target=_fetch, args=("kugou",  fetch_kugou,   artist, title), daemon=True),
+        threading.Thread(target=_fetch, args=("lrclib",   _fetch_lrclib_candidates, artist_s, title_s), daemon=True),
+        threading.Thread(target=_fetch, args=("netease",  fetch_netease,  artist_s, title_s), daemon=True),
+        threading.Thread(target=_fetch, args=("kugou",    fetch_kugou,    artist_s, title_s), daemon=True),
     ]
     for t in threads:
         t.start()
@@ -258,18 +296,6 @@ def fetch_candidates(artist: str, title: str) -> list[list[tuple[float, str]]]:
             if fp not in seen:
                 seen.add(fp)
                 candidates.append(c)
-
-    # Fallback: if few results and artist is set, retry lrclib with title only
-    # (helps when artist name uses variant chars, e.g. 海來阿木 vs 海来阿木)
-    if len(candidates) < 2 and artist and title:
-        extra = _fetch_lrclib_candidates("", title)
-        if isinstance(extra, list):
-            for c in (extra if extra and isinstance(extra[0], list) else [extra] if extra else []):
-                if c:
-                    fp = _fingerprint(c)
-                    if fp not in seen:
-                        seen.add(fp)
-                        candidates.append(c)
 
     return candidates
 
