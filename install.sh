@@ -59,7 +59,8 @@ if ! command -v pipx &>/dev/null; then
   _info "Installing pipx..."
   if [ "$OS" = "Darwin" ] && command -v brew &>/dev/null; then
     HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1 _run brew install pipx
-    _run pipx ensurepath
+    pipx ensurepath >>"$LOG_FILE" 2>&1 || true
+    export PATH="$HOME/.local/bin:$PATH"
   else
     _run "$_python" -m pip install --user pipx
     export PATH="$HOME/.local/bin:$PATH"
@@ -79,6 +80,8 @@ if ! command -v pipx &>/dev/null; then
 fi
 
 _info "pipx $(pipx --version)"
+# Ensure pipx's bin dir is live in the current session
+export PATH="$HOME/.local/bin:$PATH"
 
 # ── 4. idempotency check ─────────────────────────────────────────────────────
 if pipx list 2>/dev/null | grep -q "myplaylist"; then
@@ -93,7 +96,26 @@ fi
 
 # ── 5. install myplaylist ─────────────────────────────────────────────────────
 _info "Installing myplaylist via pipx..."
-_run pipx install myplaylist
+if ! pipx install myplaylist 2>&1 | tee -a "$LOG_FILE"; then
+  _error "Failed to install myplaylist. See full log: $LOG_FILE"
+fi
+
+# Verify binary is accessible
+if ! command -v myplaylist &>/dev/null; then
+  PIPX_BIN_DIR="${PIPX_BIN_DIR:-$HOME/.local/bin}"
+  if [ -f "$PIPX_BIN_DIR/myplaylist" ]; then
+    _warn "'myplaylist' is installed at $PIPX_BIN_DIR but not in PATH."
+    _warn "Run this to fix for the current session:"
+    _warn "  export PATH=\"$PIPX_BIN_DIR:\$PATH\""
+    if [ "$OS" = "Darwin" ]; then
+      _warn "To make it permanent: echo 'export PATH=\"$PIPX_BIN_DIR:\$PATH\"' >> ~/.zshrc"
+    else
+      _warn "To make it permanent: echo 'export PATH=\"$PIPX_BIN_DIR:\$PATH\"' >> ~/.bashrc"
+    fi
+  else
+    _error "myplaylist binary not found after install. Check the log: $LOG_FILE"
+  fi
+fi
 
 # ── 6. mpv detection & install ───────────────────────────────────────────────
 if command -v mpv &>/dev/null; then
@@ -126,4 +148,7 @@ echo "    myplaylist new     — create a new playlist from prompt or seed song"
 echo "    myplaylist list    — list saved playlists"
 echo "    myplaylist play    — play a saved playlist"
 echo "    myplaylist setup   — re-run first-time setup"
+echo ""
+echo "  If 'myplaylist' is not found, open a new terminal or run:"
+echo "    source ~/.zshrc   # (or ~/.bashrc on Linux)"
 echo ""
