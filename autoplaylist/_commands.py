@@ -160,7 +160,7 @@ def cmd_delete(name: str) -> None:
 # play / export — delegate to player/export modules
 # ---------------------------------------------------------------------------
 
-def cmd_play(name: Optional[str] = None) -> None:
+def cmd_play(name: Optional[str] = None, debug: bool = False) -> None:
     all_playlists = pl.list_all()
     if not all_playlists:
         console.print("[red]No playlists found. Run `myplaylist new` to create one.[/red]")
@@ -193,7 +193,7 @@ def cmd_play(name: Optional[str] = None) -> None:
         raise SystemExit(1)
 
     from autoplaylist.player import play_playlist
-    play_playlist(playlists, active_idx)
+    play_playlist(playlists, active_idx, debug=debug)
 
 
 def cmd_export(name: str, format: str, output: Optional[str]) -> None:

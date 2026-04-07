@@ -106,23 +106,49 @@ def _find_ytdlp() -> str:
 # mpv launch via yt-dlp pipe
 # ---------------------------------------------------------------------------
 
-def _launch_mpv(youtube_url: str) -> tuple[subprocess.Popen, subprocess.Popen]:
+_LOG_FILE = pathlib.Path.home() / ".myplaylist" / "player.log"
+
+
+def _launch_mpv(
+    youtube_url: str,
+    debug: bool = False,
+) -> tuple[subprocess.Popen, subprocess.Popen]:
     if os.path.exists(_IPC_SOCK):
         os.unlink(_IPC_SOCK)
     ytdlp_path = _find_ytdlp()
+
+    if debug:
+        _LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        log_fh = open(_LOG_FILE, "a")
+        import datetime
+        log_fh.write(f"\n--- {datetime.datetime.now().isoformat()} ---\n")
+        log_fh.write(f"yt-dlp: {ytdlp_path}\n")
+        log_fh.write(f"url:    {youtube_url}\n")
+        log_fh.flush()
+        ytdlp_stderr = log_fh
+        mpv_stderr = log_fh
+    else:
+        log_fh = None
+        ytdlp_stderr = subprocess.DEVNULL
+        mpv_stderr = subprocess.DEVNULL
+
     ytdlp_proc = subprocess.Popen(
-        [ytdlp_path, "-f", "bestaudio/best", "-o", "-", "--quiet", "--no-playlist", youtube_url],
+        [ytdlp_path, "-f", "bestaudio/best", "-o", "-", "--no-playlist", youtube_url]
+        + ([] if debug else ["--quiet"]),
         stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
+        stderr=ytdlp_stderr,
     )
     mpv_proc = subprocess.Popen(
-        ["mpv", "--no-video", "--really-quiet", f"--input-ipc-server={_IPC_SOCK}", "-"],
+        ["mpv", "--no-video", f"--input-ipc-server={_IPC_SOCK}", "-"]
+        + ([] if debug else ["--really-quiet"]),
         stdin=ytdlp_proc.stdout,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=log_fh if debug else subprocess.DEVNULL,
+        stderr=mpv_stderr,
     )
     if ytdlp_proc.stdout:
         ytdlp_proc.stdout.close()
+    if log_fh:
+        log_fh.close()
     return ytdlp_proc, mpv_proc
 
 
@@ -633,7 +659,7 @@ def _box_row(vis: str, disp: str, inner_width: int = _IW) -> str:
 # Main player
 # ---------------------------------------------------------------------------
 
-def play_playlist(playlists: list[dict], active_idx: int = 0) -> None:
+def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = False) -> None:
     """Play playlists with tab switching support.
 
     Each dict in playlists must have: name (str), tracks (list[Track]), prompt (str).
@@ -642,6 +668,11 @@ def play_playlist(playlists: list[dict], active_idx: int = 0) -> None:
     if not playlists:
         print("No playlists available.")
         return
+
+    if debug:
+        _LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        print(f"[debug] player log: {_LOG_FILE}")
+        print(f"[debug] yt-dlp: {_find_ytdlp()}")
 
     # Unpack active playlist
     playlist_name: str = playlists[active_idx]["name"]
@@ -1009,7 +1040,7 @@ def play_playlist(playlists: list[dict], active_idx: int = 0) -> None:
             label = _make_label(tracks[current_idx], 55)
             cursor_idx = current_idx
             _status(f"Loading  {label}")
-            ytdlp_proc, mpv_proc = _launch_mpv(tracks[current_idx].youtube_url)
+            ytdlp_proc, mpv_proc = _launch_mpv(tracks[current_idx].youtube_url, debug=debug)
 
             # Fetch lyrics candidates in background while track loads
             from autoplaylist import lyrics as _lyr

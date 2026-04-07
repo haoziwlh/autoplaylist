@@ -67,7 +67,10 @@ def show(name: str = typer.Argument(..., help="Playlist name")) -> None:
 
 
 @app.command()
-def play(name: Optional[str] = typer.Argument(None, help="Playlist name (default: most recent)")) -> None:
+def play(
+    name: Optional[str] = typer.Argument(None, help="Playlist name (default: most recent)"),
+    debug: bool = typer.Option(False, "--debug", help="Log yt-dlp/mpv output to ~/.myplaylist/player.log"),
+) -> None:
     """Play a saved playlist in the terminal.
 
     \b
@@ -82,7 +85,7 @@ def play(name: Optional[str] = typer.Argument(None, help="Playlist name (default
       q        quit
     """
     from autoplaylist import _commands
-    _commands.cmd_play(name)
+    _commands.cmd_play(name, debug=debug)
 
 
 @app.command()
