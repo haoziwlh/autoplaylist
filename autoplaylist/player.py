@@ -512,7 +512,7 @@ _BAR_W = 16    # progress bar block width
 # ---------------------------------------------------------------------------
 # full bar: text labels only (no symbols), shown when terminal is wide enough (~92 cols)
 _CTRL_VIS_FULL_OPEN  = ("  [p] pause [n] next [↑↓] sel [←→] pg"
-                         " [↵] play [q] quit [L] lyrics [+] more [d] del [s] save  [[] prev []] next  [y] lyrics src")
+                         " [↵] play [q] quit [L] lyrics [+] more [d] del [s] save  [[] prev []] next  [y] lyrics src [Y] refresh")
 _CTRL_VIS_FULL_CLOSE = ("  [p] pause [n] next [↑↓] sel [←→] pg"
                          " [↵] play [q] quit [l] lyrics [+] more [d] del [s] save  [[] prev []] next  [y] lyrics src")
 # compact: symbols only, fits ≤ 80 (panel-closed box)
@@ -534,7 +534,7 @@ def _ctrl_bar(avail: int, panel_open: bool, mode: str = "seq") -> tuple[str, str
                 f" {_D}[↵]{_R} play {_D}[q]{_R} quit {Ld} lyrics {_D}[+]{_R} more"
                 f" {_D}[d]{_R} del {_D}[s]{_R} save"
                 f"  {_D}[[]" f"{_R} prev {_D}[]]" f"{_R} next"
-                f"  {_D}[y]{_R} lyrics src"
+                f"  {_D}[y]{_R} lyrics src  {_D}[Y]{_R} refresh"
                 f"  {_D}[r]{_R}{icon}")
     else:
         vis = vis_short
@@ -1479,6 +1479,30 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                                               _lyric["anim_t"], _lyric["mood"])
                             sys.stdout.flush()
                         _status(f"Lyrics {_lrc_idx[0] + 1}/{n_cands}")
+                        # Persist preference: put selected candidate first in cache
+                        _t = tracks[current_idx]
+                        idx = _lrc_idx[0]
+                        if idx != 0 and _lrc_candidates:
+                            from autoplaylist import cache as _cache
+                            reordered = _lrc_candidates[idx:] + _lrc_candidates[:idx]
+                            _cache.save_lyrics(_t.artist, _t.title, reordered)
+                            _lrc_candidates[:] = reordered
+                            _lrc_idx[0] = 0
+
+                elif key == "Y":
+                    # Clear cached lyrics for current track and re-fetch
+                    _t = tracks[current_idx]
+                    from autoplaylist import cache as _cache
+                    _cache.save_lyrics(_t.artist, _t.title, [])  # clear by saving empty
+                    _lrc_candidates.clear()
+                    _lrc_ready[0] = False
+                    _lrc_idx[0] = 0
+                    _lyric["line"] = None; _lyric["off"] = 0; _lyric["idx"] = None
+                    _status("Refreshing lyrics…")
+                    _lrc_thread2 = threading.Thread(
+                        target=_fetch_lyrics, args=(_t.artist, _t.title), daemon=True
+                    )
+                    _lrc_thread2.start()
 
                 elif key == "r":
                     modes = ["seq", "repeat", "shuffle"]

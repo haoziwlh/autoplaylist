@@ -106,9 +106,12 @@ def get_lyrics(artist: str, title: str) -> list | None:
 
 
 def save_lyrics(artist: str, title: str, candidates: list) -> None:
-    """Persist lyric candidates to disk."""
-    _ensure_dirs()
+    """Persist lyric candidates to disk. Pass empty list to delete cached entry."""
     p = _LYRICS_DIR / f"{_lyrics_key(artist, title)}.json"
+    if not candidates:
+        p.unlink(missing_ok=True)
+        return
+    _ensure_dirs()
     try:
         p.write_text(json.dumps(candidates), encoding="utf-8")
     except Exception:

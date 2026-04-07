@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import base64
 import json
 import re
+import threading
 import urllib.parse
 import urllib.request
 from typing import Optional
@@ -129,25 +131,134 @@ def fetch_netease(artist: str, title: str) -> list[tuple[float, str]]:
 
 
 # ---------------------------------------------------------------------------
+# Source: Kugou Music (酷狗)
+# ---------------------------------------------------------------------------
+
+def fetch_kugou(artist: str, title: str) -> list[tuple[float, str]]:
+    """Fetch time-synced lyrics from Kugou Music (no API key required)."""
+    _HEADERS = {"User-Agent": "Mozilla/5.0"}
+    try:
+        # 1. Search for song
+        q = f"{artist} {title}".strip() if artist else title
+        params = urllib.parse.urlencode(
+            {"format": "json", "keyword": q, "page": "1", "pagesize": "5", "showtype": "1"}
+        )
+        req = urllib.request.Request(
+            f"https://mobilecdn.kugou.com/api/v3/search/song?{params}",
+            headers=_HEADERS,
+        )
+        with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+            result = json.loads(resp.read().decode())
+        songs = result.get("data", {}).get("info", [])
+        if not songs:
+            return []
+        song = songs[0]
+        hash_val = song.get("hash", "")
+        album_audio_id = song.get("album_audio_id", 0)
+        if not hash_val:
+            return []
+
+        # 2. Get lyrics candidates list
+        params2 = urllib.parse.urlencode({
+            "ver": "1", "man": "yes", "client": "mobi",
+            "keyword": title, "duration": "", "hash": hash_val,
+            "album_audio_id": album_audio_id,
+        })
+        req2 = urllib.request.Request(
+            f"https://krcs.kugou.com/search?{params2}",
+            headers=_HEADERS,
+        )
+        with urllib.request.urlopen(req2, timeout=_TIMEOUT) as resp2:
+            ldata = json.loads(resp2.read().decode())
+        candidates_list = ldata.get("candidates", [])
+        if not candidates_list:
+            return []
+        cand = candidates_list[0]
+        lrc_id = cand.get("id", "")
+        access_key = cand.get("accesskey", "")
+        if not lrc_id or not access_key:
+            return []
+
+        # 3. Download LRC (base64-encoded)
+        params3 = urllib.parse.urlencode({
+            "ver": "1", "client": "mobi",
+            "id": lrc_id, "accesskey": access_key,
+            "fmt": "lrc", "charset": "utf8",
+        })
+        req3 = urllib.request.Request(
+            f"https://lyrics.kugou.com/download?{params3}",
+            headers=_HEADERS,
+        )
+        with urllib.request.urlopen(req3, timeout=_TIMEOUT) as resp3:
+            dl = json.loads(resp3.read().decode())
+        encoded = dl.get("content", "")
+        if not encoded:
+            return []
+        lrc_str = base64.b64decode(encoded).decode("utf-8", errors="ignore")
+        return _parse_lrc(lrc_str)
+    except Exception:
+        return []
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
 def fetch_candidates(artist: str, title: str) -> list[list[tuple[float, str]]]:
     """
-    Fetch all available lyric candidates for a track.
+    Fetch lyric candidates from all sources in parallel.
 
-    Returns a list of candidates, each being a list of (seconds, text) tuples.
-    lrclib results come first; Netease appended if not duplicate.
-    Returns [] if no candidates found from any source.
+    Returns a list of unique candidates (lrclib, Netease, Kugou),
+    deduplicated by fingerprint. Each candidate is [(seconds, text), ...].
     """
-    candidates = _fetch_lrclib_candidates(artist, title)
+    results: dict[str, list[tuple[float, str]]] = {}
+    lock = threading.Lock()
 
-    # Append Netease if it adds a unique result
-    netease = fetch_netease(artist, title)
-    if netease:
-        seen = {_fingerprint(c) for c in candidates}
-        if _fingerprint(netease) not in seen:
-            candidates.append(netease)
+    def _fetch(key: str, fn, *args) -> None:
+        try:
+            val = fn(*args)
+            if val:
+                with lock:
+                    results[key] = val
+        except Exception:
+            pass
+
+    threads = [
+        threading.Thread(target=_fetch, args=("lrclib", _fetch_lrclib_candidates, artist, title), daemon=True),
+        threading.Thread(target=_fetch, args=("netease", fetch_netease, artist, title), daemon=True),
+        threading.Thread(target=_fetch, args=("kugou",  fetch_kugou,   artist, title), daemon=True),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=_TIMEOUT + 1)
+
+    # Merge: lrclib first (may return multiple), then netease, then kugou
+    candidates: list[list[tuple[float, str]]] = []
+    seen: set[str] = set()
+
+    lrclib_result = results.get("lrclib")
+    if isinstance(lrclib_result, list):
+        if lrclib_result and isinstance(lrclib_result[0], list):
+            # _fetch_lrclib_candidates returns list of lists
+            for c in lrclib_result:
+                fp = _fingerprint(c)
+                if fp not in seen:
+                    seen.add(fp)
+                    candidates.append(c)
+        elif lrclib_result:
+            fp = _fingerprint(lrclib_result)
+            if fp not in seen:
+                seen.add(fp)
+                candidates.append(lrclib_result)
+
+    for key in ("netease", "kugou"):
+        c = results.get(key)
+        if c and isinstance(c, list) and c and isinstance(c[0], tuple):
+            fp = _fingerprint(c)
+            if fp not in seen:
+                seen.add(fp)
+                candidates.append(c)
 
     return candidates
 
