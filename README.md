@@ -14,7 +14,7 @@ Generate and play music playlists in your terminal from natural language prompts
 - **You own your playlists** — add, delete, reorder, and save tracks live during playback; export to M3U/CSV/JSON for use anywhere
 - **Vast music catalog** — any song on YouTube is fair game, from mainstream hits to obscure jazz recordings and everything in between
 - **No account, no tracking** — everything stays local in `~/.myplaylist/`; no sign-up, no cloud sync, no data collection
-- **Zero extra subscription** — works with your existing Claude subscription, or a minimal Gemini API key; no music platform membership required
+- **Zero extra subscription** — works with your existing Claude subscription, a free Groq/Qwen/DeepSeek API key, or a local Ollama instance; no music platform membership required
 - **Immersive terminal experience** — time-synced lyrics and mood-driven ASCII animations keep the vibe going while you work
 
 ## Features
@@ -27,7 +27,7 @@ Generate and play music playlists in your terminal from natural language prompts
 - **Playlist loops**: automatically restarts from track 1 after the last track
 - **Local persistence** at `~/.myplaylist/playlists/`
 - **Export** to `.m3u`, `.csv`, or `.json`
-- **Flexible LLM backend**: Claude Code CLI (zero-config) or Gemini API key
+- **Multiple LLM backends**: Claude Code CLI (zero-config), Gemini, Groq, Qwen (通义千问), DeepSeek, Kimi, Ollama (local/offline), or any OpenAI-compatible endpoint
 
 ## Requirements
 
@@ -36,6 +36,8 @@ Generate and play music playlists in your terminal from natural language prompts
 - One of the following LLM backends (for natural language mode):
   - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) (`claude`) — zero-config if you have a Claude subscription
   - Gemini API key — set via `myplaylist setup`
+  - Groq, Qwen (通义千问), DeepSeek, or Kimi — free API keys, set via `myplaylist setup`
+  - [Ollama](https://ollama.com) — fully local, no API key, works offline
 
 ## Installation
 
@@ -124,7 +126,7 @@ myplaylist new "chill beats" --count 30 --name my-chill-list
 
 Press `l` during playback to open a side panel with time-synced lyrics. The panel also shows a mood-driven ASCII animation in the margin — determined per track by the LLM (calm, melancholic, energetic, romantic, nostalgic).
 
-Lyrics are fetched in parallel from [lrclib.net](https://lrclib.net) (up to 3 candidates) and [Netease Cloud Music](https://music.163.com) — improving coverage for Chinese music and other tracks not found on lrclib. Press `y` to cycle through available sources; the status bar shows the current source index (e.g. `Lyrics 2/3`).
+Lyrics are fetched in parallel from three sources: [lrclib.net](https://lrclib.net) (up to 3 candidates), [Netease Cloud Music](https://music.163.com), and [Kugou Music](https://www.kugou.com) — improving coverage for Chinese music and tracks not found on lrclib. Press `y` to cycle through available sources (the preferred source is remembered for next time); press `Y` to discard the cached lyrics and re-fetch fresh candidates.
 
 Requires terminal width ≥ 84 columns.
 
@@ -150,6 +152,27 @@ Or re-run setup and enter them interactively:
 ```bash
 myplaylist setup
 ```
+
+## LLM Backends
+
+Run `myplaylist setup` to choose your backend interactively. You can also switch at any time:
+
+```bash
+myplaylist config --llm-backend groq --llm-api-key <key>
+myplaylist config --llm-backend qwen --llm-api-key <key>
+myplaylist config --llm-backend ollama --ollama-model qwen2.5:7b
+```
+
+| Backend | Free? | Notes |
+|---|---|---|
+| `claude` | With Claude subscription | Zero-config; recommended |
+| `gemini` | Free tier | `gemini-2.5-flash` |
+| `groq` | Free tier | Fast inference; llama3 |
+| `qwen` | Free credits | Best for Chinese music; [get key](https://dashscope.aliyun.com/) |
+| `deepseek` | Free credits | Strong reasoning; [get key](https://platform.deepseek.com/) |
+| `kimi` | Free credits | Moonshot AI; [get key](https://platform.moonshot.cn/) |
+| `ollama` | Free, local | Requires [Ollama](https://ollama.com) + `ollama pull qwen2.5:7b` |
+| `openai-compat` | Varies | Any OpenAI-compatible endpoint |
 
 ## Troubleshooting
 
@@ -182,6 +205,18 @@ source ~/.bashrc  # Linux / bash
   config.json          # API keys and settings
   playlists/
     <name>.json        # Saved playlists
+  cache/
+    audio/             # Cached audio files (LRU, default 500 MB)
+    lyrics/            # Cached lyrics per track
+```
+
+Audio and lyrics are cached on first play for faster subsequent loads and offline listening. Cache size is configurable:
+
+```bash
+myplaylist config --cache-max-mb 1000   # increase to 1 GB
+myplaylist cache --clear                # clear everything
+myplaylist cache --clear-audio          # clear audio only
+myplaylist cache --clear-lyrics         # clear lyrics only
 ```
 
 ## Upgrade
