@@ -97,9 +97,9 @@ def _call_gemini(prompt: str) -> str:
         f"https://generativelanguage.googleapis.com/v1beta/models/"
         f"{_GEMINI_MODEL}:generateContent?key={api_key}"
     )
-    full_prompt = f"{_SYSTEM_PROMPT}\n\nMusic description: {prompt}"
     body = _json.dumps({
-        "contents": [{"parts": [{"text": full_prompt}]}]
+        "systemInstruction": {"parts": [{"text": _SYSTEM_PROMPT}]},
+        "contents": [{"parts": [{"text": f"Music description: {prompt}"}]}],
     }).encode()
 
     req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
