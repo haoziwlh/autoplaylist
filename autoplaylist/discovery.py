@@ -332,7 +332,7 @@ def _fetch_seed_track(seed_str: str, artist: str, title: str, seed_url: str) -> 
     return t
 
 
-def discover_from_seed(seed_str: str, count: int = 10) -> list[Track]:
+def discover_from_seed(seed_str: str, count: int = 10, allow_yt_fallback: bool = True) -> list[Track]:
     import sys as _sys
 
     artist, title, seed_url = _parse_seed(seed_str)
@@ -391,6 +391,9 @@ def discover_from_seed(seed_str: str, count: int = 10) -> list[Track]:
             return ([seed_track] + result) if seed_track else result
 
     # Last resort: raw YouTube search excluding the seed title
+    if not allow_yt_fallback:
+        return []
+
     _sys.stdout.write("LLM unavailable, falling back to YouTube search...\r\n")
     _sys.stdout.flush()
     excl = f"-\"{title}\"" if title else ""

@@ -965,7 +965,7 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
             # Suppress all discovery progress prints so they don't corrupt the TUI
             with contextlib.redirect_stdout(io.StringIO()), \
                  contextlib.redirect_stderr(io.StringIO()):
-                raw = _disc.discover_from_seed(seed, count=12)
+                raw = _disc.discover_from_seed(seed, count=12, allow_yt_fallback=False)
             # Deduplicate against already-in-playlist tracks
             existing = {t.norm_key() for t in tracks}
             new = [t for t in raw if t.norm_key() not in existing][:10]
@@ -978,7 +978,7 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                 else:
                     _update_header()
             else:
-                _status("No tracks found — try again later")
+                _status("LLM unavailable — configure Claude or Gemini to append tracks")
         except Exception as e:
             _status(f"Append failed: {str(e)[:60]}")
         finally:
