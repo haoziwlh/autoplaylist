@@ -112,6 +112,7 @@ myplaylist new "chill beats" --count 30 --name my-chill-list
 | `Enter` | Jump to selected track |
 | `0`–`9` + `Enter` | Jump to track by number |
 | `+` | Append ~10 more tracks (background, non-blocking) |
+| `r` | Cycle playback mode: sequential →→ / repeat-one ↺ / shuffle ⇄ |
 | `l` | Toggle lyrics panel (time-synced lyrics + mood animation) |
 | `y` | Cycle to next lyrics source (when multiple candidates available) |
 | `[` / `]` | Switch to previous / next playlist |
