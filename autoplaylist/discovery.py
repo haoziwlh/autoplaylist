@@ -332,8 +332,14 @@ def _fetch_seed_track(seed_str: str, artist: str, title: str, seed_url: str) -> 
     return t
 
 
-def discover_from_seed(seed_str: str, count: int = 10, allow_yt_fallback: bool = True) -> list[Track]:
+def discover_from_seed(seed_str: str, count: int = 10, allow_yt_fallback: bool = True,
+                       quiet: bool = False) -> list[Track]:
     import sys as _sys
+
+    def _print(msg: str) -> None:
+        if not quiet:
+            _sys.stdout.write(msg)
+            _sys.stdout.flush()
 
     artist, title, seed_url = _parse_seed(seed_str)
     seed_blacklist = _seed_words(seed_str, artist, title)
@@ -344,8 +350,7 @@ def discover_from_seed(seed_str: str, count: int = 10, allow_yt_fallback: bool =
     # Try Last.fm first
     lfm_similar: list[Track] = []
     if artist and title:
-        _sys.stdout.write("\r\nSearching Last.fm for similar tracks...\r\n")
-        _sys.stdout.flush()
+        _print("\r\nSearching Last.fm for similar tracks...\r\n")
         lfm_similar = search_lastfm_similar(artist, title, count=count)
 
     if lfm_similar:
@@ -358,20 +363,17 @@ def discover_from_seed(seed_str: str, count: int = 10, allow_yt_fallback: bool =
     # Last.fm unavailable or empty — ask LLM for song recommendations
     seed_label = f"{artist} - {title}" if (artist and title) else seed_str
     _backend = cfg.get("llm_backend", "claude").capitalize()
-    _sys.stdout.write(f"\r\nAsking {_backend} for songs similar to '{seed_label}'...\r\n")
-    _sys.stdout.flush()
+    _print(f"\r\nAsking {_backend} for songs similar to '{seed_label}'...\r\n")
 
     parsed = llm.parse_prompt(seed_label)
     recommendations = llm.get_song_recommendations(parsed)
 
     if recommendations:
-        _sys.stdout.write(f"Got {len(recommendations)} recommendations, searching YouTube...\r\n")
-        _sys.stdout.flush()
+        _print(f"Got {len(recommendations)} recommendations, searching YouTube...\r\n")
         all_tracks: list[Track] = []
         want = (count - 1) if seed_track else count
         for i, song_query in enumerate(recommendations):
-            _sys.stdout.write(f"\r  [{i+1}/{len(recommendations)}] {song_query:<55}")
-            _sys.stdout.flush()
+            _print(f"\r  [{i+1}/{len(recommendations)}] {song_query:<55}")
             results = search_ytdlp(song_query, count=2)
             good = [t for t in results if not _is_garbage(t) and _not_seed(t, seed_blacklist)]
             if good:
@@ -383,8 +385,7 @@ def discover_from_seed(seed_str: str, count: int = 10, allow_yt_fallback: bool =
                 all_tracks.append(t)
             if len(all_tracks) >= want:
                 break
-        _sys.stdout.write("\r\n")
-        _sys.stdout.flush()
+        _print("\r\n")
         candidates = deduplicate(all_tracks)
         if candidates:
             result = candidates[:want]

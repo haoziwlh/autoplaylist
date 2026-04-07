@@ -987,14 +987,20 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
 
     def _do_append() -> None:
         """Background: generate ~10 tracks similar to current song and append."""
-        import io, contextlib
+        import traceback, datetime
+        def _log(msg: str) -> None:
+            try:
+                _LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+                with open(_LOG_FILE, "a") as _f:
+                    _f.write(f"[append {datetime.datetime.now().strftime('%H:%M:%S')}] {msg}\n")
+            except Exception:
+                pass
         try:
             from autoplaylist import discovery as _disc
             seed = f"{tracks[current_idx].artist} - {tracks[current_idx].title}"
-            # Suppress all discovery progress prints so they don't corrupt the TUI
-            with contextlib.redirect_stdout(io.StringIO()), \
-                 contextlib.redirect_stderr(io.StringIO()):
-                raw = _disc.discover_from_seed(seed, count=12, allow_yt_fallback=False)
+            _log(f"starting append for: {seed}")
+            raw = _disc.discover_from_seed(seed, count=12, allow_yt_fallback=False, quiet=True)
+            _log(f"raw results: {len(raw)} tracks")
             # Deduplicate against already-in-playlist tracks
             existing = {t.norm_key() for t in tracks}
             new = [t for t in raw if t.norm_key() not in existing][:10]
@@ -1006,9 +1012,13 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                     _full_repaint(True, plw, lw)
                 else:
                     _update_header()
+            elif raw:
+                _status("No new tracks found — all recommendations already in playlist")
             else:
-                _status("LLM unavailable — configure Claude or Gemini to append tracks")
+                _status("No recommendations — check LLM/Last.fm config or try again")
         except Exception as e:
+            tb = traceback.format_exc()
+            _log(f"exception: {e}\n{tb}")
             _status(f"Append failed: {str(e)[:60]}")
         finally:
             _appending[0] = False
