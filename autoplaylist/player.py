@@ -1034,7 +1034,16 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
     signal.signal(signal.SIGINT, _sigint_handler)
 
     def _status(text: str) -> None:
-        sys.stdout.write(f"\r{_D}♪{_R}  {text:<70}"); sys.stdout.flush()
+        # Use visual width to avoid wrapping: CJK chars are 2 cols wide, so
+        # {text:<70} (Python char count) can exceed terminal width and corrupt
+        # the cursor position that _draw_track() relies on.
+        avail = _IW - 3  # 80 - 3 cols reserved for "♪  "
+        tw = _cjk_width(text)
+        if tw > avail:
+            text = _truncate(text, avail)
+            tw = avail
+        sys.stdout.write(f"\r{_D}♪{_R}  {text}{' ' * (avail - tw)}")
+        sys.stdout.flush()
 
     def _jump_to(target: int) -> None:
         nonlocal current_idx, cursor_idx, paused
