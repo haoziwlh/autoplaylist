@@ -1,9 +1,9 @@
 class Myplaylist < Formula
   desc "AI-powered music playlist generator and player"
   homepage "https://github.com/haoziwlh/autoplaylist"
-  url "https://files.pythonhosted.org/packages/2f/6b/12096d25c3828c96322bd2292ad17e0600e6472e23eb4760ff3320cd38b2/myplaylist-0.3.20-py3-none-any.whl",,,,,,,,,,,,,,,,,
+  url "https://files.pythonhosted.org/packages/c2/50/7dda973dd8a2ee7fe2eb74884aabd2e0c351aa519bcc788e4b07ffe83462/myplaylist-0.3.21-py3-none-any.whl",,,,,,,,,,,,,,,,,,
       using: :nounzip
-  sha256 "5358e438ea0fa13667056ab299082585635bd5a4bc43bcb6e70343d6d6108e55"
+  sha256 "2c9a45c5a4a1695ecb11fc157428876b315d57fbe04c55149040b2010bb688b5"
   license "MIT"
 
   depends_on "python@3.11"
