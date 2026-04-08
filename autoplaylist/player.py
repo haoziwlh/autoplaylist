@@ -1384,7 +1384,7 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                 # Advance lyric marquee every 0.3 s
                 if now - _last_step_ts >= 0.3:
                     _last_step_ts = now
-                    if not num_buf:
+                    if not num_buf and not paused:
                         _tick_lyric()
 
                 if num_buf and now - num_ts > 1.5:
@@ -1401,7 +1401,14 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                     paused = not paused; _mpv_pause(paused)
                     state = "Paused " if paused else "Playing"
                     _status(f"{state}  [{current_idx + 1}/{len(tracks)}]  {label}")
-                    _draw_track(current_idx, True, paused, cursor_idx == current_idx)
+                    if not paused:
+                        # Force immediate re-sync of lyric line/idx and reset marquee
+                        _last_pos_ts = 0.0
+                        _lyric["off"] = 0
+                        _prev_lrc_line = None
+                        _tick_lyric()
+                    else:
+                        _draw_track(current_idx, True, paused, cursor_idx == current_idx)
                     sys.stdout.flush()
 
                 elif key == "l":

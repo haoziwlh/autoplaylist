@@ -210,8 +210,18 @@ def _setup_lastfm() -> None:
         "(Press Enter to skip and use yt-dlp-only mode)\n"
     )
 
-    key = Prompt.ask("Last.fm API key", default="").strip()
-    if not key:
+    existing_key = (cfg.get("lastfm_key") or "").strip()
+    existing_secret = (cfg.get("lastfm_secret") or "").strip()
+
+    def _mask(v: str) -> str:
+        return f"(existing: {v[:4]}…{v[-2:]})" if len(v) >= 6 else "(existing set)"
+
+    key_prompt = "Last.fm API key"
+    if existing_key:
+        key_prompt += f" {_mask(existing_key)}, press Enter to keep"
+    key = Prompt.ask(key_prompt, default="").strip()
+
+    if not key and not existing_key:
         cfg.set_value("lastfm_key", None)
         cfg.set_value("lastfm_secret", None)
         console.print(
@@ -220,10 +230,15 @@ def _setup_lastfm() -> None:
         )
         return
 
-    secret = Prompt.ask("Last.fm API secret (optional, press Enter to skip)", default="").strip()
+    secret_prompt = "Last.fm API secret (optional, press Enter to skip)"
+    if existing_secret:
+        secret_prompt = f"Last.fm API secret {_mask(existing_secret)}, press Enter to keep"
+    secret = Prompt.ask(secret_prompt, default="").strip()
 
-    cfg.set_value("lastfm_key", key)
-    cfg.set_value("lastfm_secret", secret or None)
+    if key:
+        cfg.set_value("lastfm_key", key)
+    if secret:
+        cfg.set_value("lastfm_secret", secret)
     console.print("[green]✓ Last.fm API key saved[/green]")
 
 
