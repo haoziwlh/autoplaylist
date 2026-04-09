@@ -831,6 +831,63 @@ def _box_row(vis: str, disp: str, inner_width: int = -1) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Player core — pure state container for a playback session.
+#
+# Step 1 of the decouple-player-core-ui change: migrate all mutable fields
+# out of the play_playlist() closure into this class. No event loop, no
+# command methods, no subscribers yet — those come in step 2. For now this
+# is only a typed bag of state so that ownership of each field is explicit.
+# ---------------------------------------------------------------------------
+
+from dataclasses import dataclass, field
+from typing import Any
+
+
+@dataclass
+class PlayerCore:
+    # ── session / playlist ──
+    playlists: list[dict]
+    active_idx: int
+    debug: bool
+    playlist_name: str = ""
+    tracks: list = field(default_factory=list)
+    prompt: str = ""
+    n: int = 0
+    vh: int = 0
+
+    # ── playback cursor / ui cursor ──
+    current_idx: int = 0
+    cursor_idx: int = 0
+    view_start: int = 0
+    paused: bool = False
+    play_mode: str = "seq"   # "seq" | "repeat" | "shuffle"
+
+    # ── lyric state (shared dict, preserved shape for minimal diff) ──
+    lyric: dict = field(default_factory=lambda: {
+        "line": None, "off": 0, "idx": None, "pos": None,
+        "mood": "calm", "anim_t": 0,
+    })
+    lrc_candidates: list = field(default_factory=list)
+    lrc_idx: int = 0
+    lrc_ready: bool = False
+    last_pos_ts: float = 0.0
+    last_step_ts: float = 0.0
+    prev_lrc_line: Any = None
+
+    # ── lyric panel ──
+    lyric_panel_on: bool = False
+    panel_widths: Any = None  # Optional[tuple[int,int,int]]
+
+    # ── async coordination flags ──
+    appending: bool = False
+    switch_tab: int = 0   # -1 prev, 0 none, +1 next
+
+    # ── playback backend handles ──
+    ytdlp_proc: Any = None
+    mpv_proc: Any = None
+
+
+# ---------------------------------------------------------------------------
 # Main player
 # ---------------------------------------------------------------------------
 
@@ -850,12 +907,16 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
         print(f"[debug] yt-dlp:   {_find_ytdlp()}")
         print(f"[debug] browser:  {_get_browser() or 'none detected'}")
 
-    # Unpack active playlist
-    playlist_name: str = playlists[active_idx]["name"]
-    tracks: list[Track] = list(playlists[active_idx]["tracks"])
-    prompt: str = playlists[active_idx]["prompt"]
+    # Unpack active playlist into a PlayerCore state container.
+    # Step 1 of decouple-player-core-ui: all mutable session state lives on
+    # `core` from here on. Render helpers and the main loop read/write
+    # `core.<field>` directly — no event loop yet.
+    core = PlayerCore(playlists=playlists, active_idx=active_idx, debug=debug)
+    core.playlist_name = playlists[active_idx]["name"]
+    core.tracks = list(playlists[active_idx]["tracks"])
+    core.prompt = playlists[active_idx]["prompt"]
 
-    if not tracks:
+    if not core.tracks:
         print("Playlist is empty.")
         return
 
@@ -878,52 +939,44 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
     sys.stdout.write("\033[?7l")   # disable terminal auto-wrap for TUI session
     sys.stdout.flush()
 
-    n = len(tracks)
-    vh = min(_VIEW_H, n)   # actual viewport height
-    view_start = [0]        # first visible track index (mutable ref)
-    current_idx = 0
-    cursor_idx  = 0
-    paused      = False
-    _lyric: dict = {"line": None, "off": 0, "idx": None, "pos": None,
-                    "mood": "calm", "anim_t": 0}   # shared lyric state
-    lyric_panel_on: bool = False
-    _panel_widths: Optional[tuple[int, int, int]] = None
-    _appending = [False]   # True while background append is running
-    _switch_tab = [0]      # 0=no switch, -1=prev, +1=next
-    play_mode = "seq"      # "seq" | "repeat" | "shuffle"
+    core.n = len(core.tracks)
+    core.vh = min(_VIEW_H, core.n)   # actual viewport height
+    # All other fields (view_start, current_idx, cursor_idx, paused, lyric,
+    # lyric_panel_on, panel_widths, appending, switch_tab, play_mode,
+    # lrc_* and last_* timers) use dataclass defaults.
 
     # ── viewport helpers ──────────────────────────────────────────────────────
 
     def _lines_up(rel: int) -> int:
         """Lines from status line up to track at viewport-relative position rel."""
-        return 3 + vh - rel
+        return 3 + core.vh - rel
 
     def _row_for(idx: int) -> Optional[int]:
         """Return viewport-relative row for track idx, or None if off-screen."""
-        rel = idx - view_start[0]
-        return rel if 0 <= rel < vh else None
+        rel = idx - core.view_start
+        return rel if 0 <= rel < core.vh else None
 
     def _draw_track(idx: int, playing: bool, is_paused: bool, cursored: bool) -> None:
         rel = _row_for(idx)
         if rel is None:
             return
-        if lyric_panel_on and _panel_widths:
-            _, plw, lw = _panel_widths
+        if core.lyric_panel_on and core.panel_widths:
+            _, plw, lw = core.panel_widths
             lbl_w = max(10, plw - 20)
-            p   = _lyric["pos"] if playing else None
-            dur = tracks[idx].duration_seconds if playing else 0
-            vis  = _track_inner_vis(idx, playing, cursored, tracks, None, 0, True, lbl_w,
+            p   = core.lyric["pos"] if playing else None
+            dur = core.tracks[idx].duration_seconds if playing else 0
+            vis  = _track_inner_vis(idx, playing, cursored, core.tracks, None, 0, True, lbl_w,
                                     p, dur)
-            disp = _track_inner_disp(idx, playing, is_paused, cursored, tracks,
+            disp = _track_inner_disp(idx, playing, is_paused, cursored, core.tracks,
                                      None, 0, True, lbl_w, p, dur)
             row_pad = max(0, plw - _cjk_width(vis))
             # Write only the left column; cursor stops at │ so lyric column is untouched
             row = f"│{disp}{' ' * row_pad}│"
         else:
-            ll = _lyric["line"] if playing else None
-            lo = _lyric["off"]  if playing else 0
-            vis  = _track_inner_vis(idx, playing, cursored, tracks, ll, lo, False)
-            disp = _track_inner_disp(idx, playing, is_paused, cursored, tracks, ll, lo, False)
+            ll = core.lyric["line"] if playing else None
+            lo = core.lyric["off"]  if playing else 0
+            vis  = _track_inner_vis(idx, playing, cursored, core.tracks, ll, lo, False)
+            disp = _track_inner_disp(idx, playing, is_paused, cursored, core.tracks, ll, lo, False)
             row = _box_row(vis, disp)
         # Use up/down instead of save/restore cursor (\033[s/\033[u) — Terminal.app
         # does not always implement save/restore reliably, causing rows to be drawn
@@ -933,41 +986,41 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
 
     def _redraw_viewport() -> None:
         """Redraw all visible track rows in place."""
-        if lyric_panel_on and _panel_widths:
-            _, plw, lw = _panel_widths
+        if core.lyric_panel_on and core.panel_widths:
+            _, plw, lw = core.panel_widths
             _full_repaint(True, plw, lw)
             return
-        for rel in range(vh):
-            idx = view_start[0] + rel
-            _draw_track(idx, idx == current_idx, paused and idx == current_idx,
-                        idx == cursor_idx)
+        for rel in range(core.vh):
+            idx = core.view_start + rel
+            _draw_track(idx, idx == core.current_idx, core.paused and idx == core.current_idx,
+                        idx == core.cursor_idx)
         sys.stdout.flush()
 
     def _scroll_to(idx: int) -> bool:
         """Shift view so idx is visible. Return True if view changed."""
-        vs = view_start[0]
+        vs = core.view_start
         if idx < vs:
-            view_start[0] = idx
-        elif idx >= vs + vh:
-            view_start[0] = idx - vh + 1
+            core.view_start = idx
+        elif idx >= vs + core.vh:
+            core.view_start = idx - core.vh + 1
         else:
             return False
         return True
 
     def _update_header() -> None:
         """Rewrite header to show current page range."""
-        if lyric_panel_on:
+        if core.lyric_panel_on:
             return  # handled by _full_repaint when panel is open
-        nt = len(tracks)
-        a, b = view_start[0] + 1, min(nt, view_start[0] + vh)
-        page_info = f"{a}-{b}/{nt}" if nt > vh else f"{nt} tracks"
+        nt = len(core.tracks)
+        a, b = core.view_start + 1, min(nt, core.view_start + core.vh)
+        page_info = f"{a}-{b}/{nt}" if nt > core.vh else f"{nt} tracks"
         lft = "  ♫ myplaylist  "
-        rgt_vis  = f"  {playlist_name} ({page_info})  "
-        rgt_disp = f"  {_YL}{playlist_name}{_R} ({page_info})  "
+        rgt_vis  = f"  {core.playlist_name} ({page_info})  "
+        rgt_disp = f"  {_YL}{core.playlist_name}{_R} ({page_info})  "
         hpad = max(0, _IW - len(lft) - _cjk_width(rgt_vis))
         hdr_vis  = f"{lft}{' ' * hpad}{rgt_vis}"
         hdr_disp = f"  {_B}{_CY}♫ myplaylist{_R}  " + " " * hpad + rgt_disp
-        lines_up = 3 + vh + 2   # up: _BOT, ctrl, mid, vh tracks, mid, header
+        lines_up = 3 + core.vh + 2   # up: _BOT, ctrl, mid, vh tracks, mid, header
         sys.stdout.write(f"\033[{lines_up}A\r{_box_row(hdr_vis, hdr_disp)}\033[{lines_up}B\r")
         sys.stdout.flush()
 
@@ -977,20 +1030,20 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
         total_iw = plw + 1 + lw if panel_open else _IW_NORMAL
         # Move cursor up to the blank line above the box
         # Structure: blank(1)+top(1)+hdr(1)+mid(1)+vh+mid/sep(1)+ctrl(1)+bot(1) = vh+7
-        sys.stdout.write(f"\033[{vh + 7}A\r")
+        sys.stdout.write(f"\033[{core.vh + 7}A\r")
 
-        nt = len(tracks)
-        a, b = view_start[0] + 1, min(nt, view_start[0] + vh)
-        page_info = f"{a}-{b}/{nt}" if nt > vh else f"{nt} tracks"
+        nt = len(core.tracks)
+        a, b = core.view_start + 1, min(nt, core.view_start + core.vh)
+        page_info = f"{a}-{b}/{nt}" if nt > core.vh else f"{nt} tracks"
         lft = "  ♫ myplaylist  "
-        rgt_vis  = f"  {playlist_name} ({page_info})  "
-        rgt_disp = f"  {_YL}{playlist_name}{_R} ({page_info})  "
+        rgt_vis  = f"  {core.playlist_name} ({page_info})  "
+        rgt_disp = f"  {_YL}{core.playlist_name}{_R} ({page_info})  "
 
         if not panel_open:
             hpad = max(0, _IW_NORMAL - len(lft) - _cjk_width(rgt_vis))
             hdr_vis  = f"{lft}{' ' * hpad}{rgt_vis}"
             hdr_disp = f"  {_B}{_CY}♫ myplaylist{_R}  " + " " * hpad + rgt_disp
-            ctrl_vis, ctrl_disp = _ctrl_bar(_IW_NORMAL, False, play_mode)
+            ctrl_vis, ctrl_disp = _ctrl_bar(_IW_NORMAL, False, core.play_mode)
             ctrl_pad  = max(0, _IW_NORMAL - _cjk_width(ctrl_vis))
             lines = [
                 NL,
@@ -998,15 +1051,15 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                 _box_row(hdr_vis, hdr_disp) + NL,
                 _MID + NL,
             ]
-            for rel in range(vh):
-                idx = view_start[0] + rel
-                ll = _lyric["line"] if idx == current_idx else None
-                lo = _lyric["off"]  if idx == current_idx else 0
-                vis  = _track_inner_vis(idx, idx == current_idx, idx == cursor_idx,
-                                        tracks, ll, lo, False)
-                disp = _track_inner_disp(idx, idx == current_idx,
-                                         paused and idx == current_idx,
-                                         idx == cursor_idx, tracks, ll, lo, False)
+            for rel in range(core.vh):
+                idx = core.view_start + rel
+                ll = core.lyric["line"] if idx == core.current_idx else None
+                lo = core.lyric["off"]  if idx == core.current_idx else 0
+                vis  = _track_inner_vis(idx, idx == core.current_idx, idx == core.cursor_idx,
+                                        core.tracks, ll, lo, False)
+                disp = _track_inner_disp(idx, idx == core.current_idx,
+                                         core.paused and idx == core.current_idx,
+                                         idx == core.cursor_idx, core.tracks, ll, lo, False)
                 lines.append(_box_row(vis, disp) + NL)
             lines += [_MID + NL, f"│{ctrl_disp}{' ' * ctrl_pad}│" + NL, _BOT + NL]
         else:
@@ -1016,7 +1069,7 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
             hdr_disp = f"  {_B}{_CY}♫ myplaylist{_R}  " + " " * hpad + rgt_disp
             hdr_pad  = max(0, plw - _cjk_width(hdr_vis))
             # Song title + artist in right-column header
-            t = tracks[current_idx]
+            t = core.tracks[core.current_idx]
             title_raw = _clean(t.title.strip())
             artist_raw = _clean(t.artist.strip())
             sep = "  "
@@ -1031,10 +1084,10 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
             title_vis = f" ♪ {title_short}{sep}{artist_raw}"
             title_pad = max(0, lw - _cjk_width(title_vis))
             # Lyric panel lines (with margin animation)
-            lrc_idx = _lyric.get("idx")
-            lyric_lines = _lyric_panel_lines(_active_lrc(), lrc_idx, vh, lw,
-                                             _lyric["anim_t"], _lyric["mood"])
-            ctrl_vis, ctrl_disp = _ctrl_bar(total_iw, True, play_mode)
+            lrc_idx = core.lyric.get("idx")
+            lyric_lines = _lyric_panel_lines(_active_lrc(), lrc_idx, core.vh, lw,
+                                             core.lyric["anim_t"], core.lyric["mood"])
+            ctrl_vis, ctrl_disp = _ctrl_bar(total_iw, True, core.play_mode)
             ctrl_pad = max(0, total_iw - _cjk_width(ctrl_vis))
             lines = [
                 NL,
@@ -1042,16 +1095,16 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                 f"│{hdr_disp}{' ' * hdr_pad}│{title_str}{' ' * title_pad}│" + NL,
                 _panel_mid(plw, lw) + NL,
             ]
-            for rel in range(vh):
-                idx = view_start[0] + rel
-                is_playing = idx == current_idx
-                p   = _lyric["pos"] if is_playing else None
-                dur = tracks[idx].duration_seconds if is_playing else 0
-                vis  = _track_inner_vis(idx, is_playing, idx == cursor_idx,
-                                        tracks, None, 0, True, lbl_w, p, dur)
+            for rel in range(core.vh):
+                idx = core.view_start + rel
+                is_playing = idx == core.current_idx
+                p   = core.lyric["pos"] if is_playing else None
+                dur = core.tracks[idx].duration_seconds if is_playing else 0
+                vis  = _track_inner_vis(idx, is_playing, idx == core.cursor_idx,
+                                        core.tracks, None, 0, True, lbl_w, p, dur)
                 disp = _track_inner_disp(idx, is_playing,
-                                         paused and is_playing,
-                                         idx == cursor_idx, tracks, None, 0, True, lbl_w,
+                                         core.paused and is_playing,
+                                         idx == core.cursor_idx, core.tracks, None, 0, True, lbl_w,
                                          p, dur)
                 row_pad = max(0, plw - _cjk_width(vis))
                 lines.append(f"│{disp}{' ' * row_pad}│{lyric_lines[rel]}│" + NL)
@@ -1065,10 +1118,10 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
 
     def _update_lyric_header() -> None:
         """Rewrite the right-column header (title + artist) in place."""
-        if not (lyric_panel_on and _panel_widths):
+        if not (core.lyric_panel_on and core.panel_widths):
             return
-        _, plw, lw = _panel_widths
-        t = tracks[current_idx]
+        _, plw, lw = core.panel_widths
+        t = core.tracks[core.current_idx]
         title_raw = _clean(t.title.strip())
         artist_raw = _clean(t.artist.strip())
         sep = "  "
@@ -1082,7 +1135,7 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
         title_vis = f" ♪ {title_short}{sep}{artist_raw}"
         title_pad = max(0, lw - _cjk_width(title_vis))
         content = f"{title_str}{' ' * title_pad}"
-        lines_up = 3 + vh + 2  # bot + ctrl + panel_bot + vh tracks + mid + header
+        lines_up = 3 + core.vh + 2  # bot + ctrl + panel_bot + vh tracks + mid + header
         col_offset = plw + 2   # right column starts after │plw│
         sys.stdout.write(f"\033[{lines_up}A\r\033[{col_offset}C{content}\033[{lines_up}B\r")
         sys.stdout.flush()
@@ -1099,18 +1152,18 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                 pass
         try:
             from autoplaylist import discovery as _disc
-            seed = f"{tracks[current_idx].artist} - {tracks[current_idx].title}"
+            seed = f"{core.tracks[core.current_idx].artist} - {core.tracks[core.current_idx].title}"
             _log(f"starting append for: {seed}")
             raw = _disc.discover_from_seed(seed, count=12, allow_yt_fallback=False, quiet=True)
             _log(f"raw results: {len(raw)} tracks")
             # Deduplicate against already-in-playlist tracks
-            existing = {t.norm_key() for t in tracks}
+            existing = {t.norm_key() for t in core.tracks}
             new = [t for t in raw if t.norm_key() not in existing][:10]
             if new:
-                tracks.extend(new)
-                _status(f"Added {len(new)} tracks  [{len(tracks)} total]")
-                if lyric_panel_on and _panel_widths:
-                    _, plw, lw = _panel_widths
+                core.tracks.extend(new)
+                _status(f"Added {len(new)} tracks  [{len(core.tracks)} total]")
+                if core.lyric_panel_on and core.panel_widths:
+                    _, plw, lw = core.panel_widths
                     _full_repaint(True, plw, lw)
                 else:
                     _update_header()
@@ -1123,50 +1176,47 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
             _log(f"exception: {e}\n{tb}")
             _status(f"Append failed: {str(e)[:60]}")
         finally:
-            _appending[0] = False
+            core.appending = False
 
     # ── initial box ───────────────────────────────────────────────────────────
-    a0, b0 = 1, min(n, vh)
-    page_info0 = f"{a0}-{b0}/{n}" if n > vh else f"{n} tracks"
+    a0, b0 = 1, min(core.n, core.vh)
+    page_info0 = f"{a0}-{b0}/{core.n}" if core.n > core.vh else f"{core.n} tracks"
     lft = "  ♫ myplaylist  "
-    rgt_vis0  = f"  {playlist_name} ({page_info0})  "
-    rgt_disp0 = f"  {_YL}{playlist_name}{_R} ({page_info0})  "
+    rgt_vis0  = f"  {core.playlist_name} ({page_info0})  "
+    rgt_disp0 = f"  {_YL}{core.playlist_name}{_R} ({page_info0})  "
     hpad0 = max(0, _IW - len(lft) - _cjk_width(rgt_vis0))
     hdr_vis0  = f"{lft}{' ' * hpad0}{rgt_vis0}"
     hdr_disp0 = f"  {_B}{_CY}♫ myplaylist{_R}  " + " " * hpad0 + rgt_disp0
 
-    ctrl_vis, ctrl_disp = _ctrl_bar(_IW, False, play_mode)
+    ctrl_vis, ctrl_disp = _ctrl_bar(_IW, False, core.play_mode)
     ctrl_pad  = max(0, _IW - _cjk_width(ctrl_vis))
 
     lines = [_NL, _TOP + _NL, _box_row(hdr_vis0, hdr_disp0) + _NL, _MID + _NL]
-    for i in range(vh):
-        vis  = _track_inner_vis(i, i == 0, i == 0, tracks)
-        disp = _track_inner_disp(i, i == 0, False, i == 0, tracks)
+    for i in range(core.vh):
+        vis  = _track_inner_vis(i, i == 0, i == 0, core.tracks)
+        disp = _track_inner_disp(i, i == 0, False, i == 0, core.tracks)
         lines.append(_box_row(vis, disp) + _NL)
     lines += [_MID + _NL, f"│{ctrl_disp}{' ' * ctrl_pad}│" + _NL, _BOT + _NL]
     _w("".join(lines))
 
     # ── playback state ────────────────────────────────────────────────────────
-    ytdlp_proc: Optional[subprocess.Popen] = None
-    mpv_proc:   Optional[subprocess.Popen] = None
     key_reader  = _KeyReader()
     key_reader.start()
 
     _orig_sigint = signal.getsignal(signal.SIGINT)
 
     def stop_current() -> None:
-        nonlocal ytdlp_proc, mpv_proc
         _mpv_quit()
         # Send SIGKILL to both first, then wait — avoids serial blocking
-        if mpv_proc and mpv_proc.poll() is None:
-            mpv_proc.kill()
-        if ytdlp_proc and ytdlp_proc.poll() is None:
-            ytdlp_proc.kill()
-        if mpv_proc:
-            mpv_proc.wait()
-        if ytdlp_proc:
-            ytdlp_proc.wait()
-        mpv_proc = ytdlp_proc = None
+        if core.mpv_proc and core.mpv_proc.poll() is None:
+            core.mpv_proc.kill()
+        if core.ytdlp_proc and core.ytdlp_proc.poll() is None:
+            core.ytdlp_proc.kill()
+        if core.mpv_proc:
+            core.mpv_proc.wait()
+        if core.ytdlp_proc:
+            core.ytdlp_proc.wait()
+        core.mpv_proc = core.ytdlp_proc = None
 
     def _sigint_handler(signum, frame):
         key_reader.stop(); stop_current(); _restore_terminal()
@@ -1187,17 +1237,16 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
         sys.stdout.flush()
 
     def _jump_to(target: int) -> None:
-        nonlocal current_idx, cursor_idx, paused
         stop_current()
-        old = current_idx
-        current_idx = cursor_idx = target
-        paused = False
-        _lyric["line"] = None; _lyric["off"] = 0; _lyric["idx"] = None; _lyric["pos"] = None; _lyric["mood"] = "calm"; _lyric["anim_t"] = 0
+        old = core.current_idx
+        core.current_idx = core.cursor_idx = target
+        core.paused = False
+        core.lyric["line"] = None; core.lyric["off"] = 0; core.lyric["idx"] = None; core.lyric["pos"] = None; core.lyric["mood"] = "calm"; core.lyric["anim_t"] = 0
         if _scroll_to(target):
             _redraw_viewport()
             _update_header()
         else:
-            _draw_track(old, False, False, old == cursor_idx)
+            _draw_track(old, False, False, old == core.cursor_idx)
             _draw_track(target, True, False, True)
             sys.stdout.flush()
         _update_lyric_header()
@@ -1205,70 +1254,71 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
     try:
         while True:
             # ── tab switch ────────────────────────────────────────────────────
-            if _switch_tab[0] != 0:
-                old_vh = vh
-                active_idx = (active_idx + _switch_tab[0]) % len(playlists)
-                _switch_tab[0] = 0
-                playlist_name = playlists[active_idx]["name"]
-                tracks = list(playlists[active_idx]["tracks"])
-                prompt = playlists[active_idx]["prompt"]
-                n = len(tracks)
-                vh = min(_VIEW_H, n)
-                view_start[0] = 0
-                current_idx = 0
-                cursor_idx = 0
-                paused = False
-                _lyric.update({"line": None, "off": 0, "idx": None,
-                               "pos": None, "mood": "calm", "anim_t": 0})
-                lyric_panel_on = False
-                _panel_widths = None
-                _appending[0] = False
+            if core.switch_tab != 0:
+                old_vh = core.vh
+                core.active_idx = (core.active_idx + core.switch_tab) % len(core.playlists)
+                core.switch_tab = 0
+                core.playlist_name = core.playlists[core.active_idx]["name"]
+                core.tracks = list(core.playlists[core.active_idx]["tracks"])
+                core.prompt = core.playlists[core.active_idx]["prompt"]
+                core.n = len(core.tracks)
+                core.vh = min(_VIEW_H, core.n)
+                core.view_start = 0
+                core.current_idx = 0
+                core.cursor_idx = 0
+                core.paused = False
+                core.lyric.update({"line": None, "off": 0, "idx": None,
+                                   "pos": None, "mood": "calm", "anim_t": 0})
+                core.lyric_panel_on = False
+                core.panel_widths = None
+                core.appending = False
                 # Repaint: erase old box + redraw new
                 NL = "\033[K\r\n"
                 sys.stdout.write(f"\033[{old_vh + 7}A\r\033[J")
-                nt = n
-                a0, b0 = 1, min(nt, vh)
-                page_info0 = f"{a0}-{b0}/{nt}" if nt > vh else f"{nt} tracks"
+                nt = core.n
+                a0, b0 = 1, min(nt, core.vh)
+                page_info0 = f"{a0}-{b0}/{nt}" if nt > core.vh else f"{nt} tracks"
                 lft0 = "  ♫ myplaylist  "
-                rgt_vis0  = f"  {playlist_name} ({page_info0})  "
-                rgt_disp0 = f"  {_YL}{playlist_name}{_R} ({page_info0})  "
+                rgt_vis0  = f"  {core.playlist_name} ({page_info0})  "
+                rgt_disp0 = f"  {_YL}{core.playlist_name}{_R} ({page_info0})  "
                 hpad0 = max(0, _IW - len(lft0) - _cjk_width(rgt_vis0))
                 hdr_vis0  = f"{lft0}{' ' * hpad0}{rgt_vis0}"
                 hdr_disp0 = (f"  {_B}{_CY}♫ myplaylist{_R}  "
                              + " " * hpad0 + rgt_disp0)
-                ctrl_vis, ctrl_disp = _ctrl_bar(_IW, False, play_mode)
+                ctrl_vis, ctrl_disp = _ctrl_bar(_IW, False, core.play_mode)
                 ctrl_pad = max(0, _IW - _cjk_width(ctrl_vis))
                 lines = [NL, _TOP + NL, _box_row(hdr_vis0, hdr_disp0) + NL, _MID + NL]
-                for i in range(vh):
-                    vis  = _track_inner_vis(i, i == 0, i == 0, tracks)
-                    disp = _track_inner_disp(i, i == 0, False, i == 0, tracks)
+                for i in range(core.vh):
+                    vis  = _track_inner_vis(i, i == 0, i == 0, core.tracks)
+                    disp = _track_inner_disp(i, i == 0, False, i == 0, core.tracks)
                     lines.append(_box_row(vis, disp) + NL)
                 lines += [_MID + NL, f"│{ctrl_disp}{' ' * ctrl_pad}│" + NL, _BOT + NL]
                 _w("".join(lines))
                 sys.stdout.flush()
 
-            if current_idx >= len(tracks):
-                current_idx = 0
-                cursor_idx = 0
-                _lyric["line"] = None; _lyric["off"] = 0; _lyric["idx"] = None; _lyric["pos"] = None; _lyric["mood"] = "calm"; _lyric["anim_t"] = 0
+            if core.current_idx >= len(core.tracks):
+                core.current_idx = 0
+                core.cursor_idx = 0
+                core.lyric["line"] = None; core.lyric["off"] = 0; core.lyric["idx"] = None; core.lyric["pos"] = None; core.lyric["mood"] = "calm"; core.lyric["anim_t"] = 0
                 if _scroll_to(0):
                     _redraw_viewport(); _update_header()
                 _update_lyric_header()
-            label = _make_label(tracks[current_idx], 55)
-            cursor_idx = current_idx
+            label = _make_label(core.tracks[core.current_idx], 55)
+            core.cursor_idx = core.current_idx
             _status(f"Loading  {label}")
-            ytdlp_proc, mpv_proc = _launch_mpv(tracks[current_idx].youtube_url, debug=debug)
-            _cache_mark = "⚡ " if ytdlp_proc is None else ""
+            core.ytdlp_proc, core.mpv_proc = _launch_mpv(core.tracks[core.current_idx].youtube_url, debug=core.debug)
+            _cache_mark = "⚡ " if core.ytdlp_proc is None else ""
 
-            # Fetch lyrics candidates in background while track loads
+            # Fetch lyrics candidates in background while track loads.
+            # Per-track state lives on `core` too — reset at each track load.
             from autoplaylist import lyrics as _lyr
-            _lrc_candidates: list[list[tuple[float, str]]] = []
-            _lrc_idx = [0]     # index into _lrc_candidates (mutable ref)
-            _lrc_ready = [False]
+            core.lrc_candidates = []
+            core.lrc_idx = 0
+            core.lrc_ready = False
 
             def _active_lrc() -> list[tuple[float, str]]:
-                if _lrc_candidates and _lrc_idx[0] < len(_lrc_candidates):
-                    return _lrc_candidates[_lrc_idx[0]]
+                if core.lrc_candidates and core.lrc_idx < len(core.lrc_candidates):
+                    return core.lrc_candidates[core.lrc_idx]
                 return []
 
             def _fetch_lyrics(artist: str, title: str) -> None:
@@ -1278,20 +1328,19 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                     candidates = _lyr.fetch_candidates(artist, title)
                     if candidates:
                         _cache.save_lyrics(artist, title, candidates)
-                _lrc_candidates.clear()
-                _lrc_candidates.extend(candidates or [])
-                _lrc_ready[0] = True
+                core.lrc_candidates = list(candidates or [])
+                core.lrc_ready = True
 
-            _t = tracks[current_idx]
+            _t = core.tracks[core.current_idx]
             _lrc_thread = threading.Thread(
                 target=_fetch_lyrics, args=(_t.artist, _t.title), daemon=True
             )
             _lrc_thread.start()
 
-            # Classify mood in background; result written to _lyric["mood"]
+            # Classify mood in background; result written to core.lyric["mood"]
             from autoplaylist import llm as _llm_mod
             def _classify_mood_bg(artist: str, title: str) -> None:
-                _lyric["mood"] = _llm_mod.classify_mood(artist, title)
+                core.lyric["mood"] = _llm_mod.classify_mood(artist, title)
             threading.Thread(
                 target=_classify_mood_bg, args=(_t.artist, _t.title), daemon=True
             ).start()
@@ -1305,7 +1354,7 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                 _load_key = key_reader.consume()
                 if _load_key in ("[", "]", "q"):
                     break
-                if mpv_proc.poll() is not None:
+                if core.mpv_proc.poll() is not None:
                     _load_skip = True
                     break
 
@@ -1313,79 +1362,78 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                 stop_current(); sys.stdout.write(_NL); return
 
             if _load_key in ("[", "]"):
-                if len(playlists) == 1:
+                if len(core.playlists) == 1:
                     _status("Only one playlist")
                 else:
                     try:
                         from autoplaylist import playlist as _pl
-                        _pl.save(playlist_name, tracks, prompt)
+                        _pl.save(core.playlist_name, core.tracks, core.prompt)
                     except Exception:
                         pass
                     stop_current()
-                    _switch_tab[0] = -1 if _load_key == "[" else 1
+                    core.switch_tab = -1 if _load_key == "[" else 1
                 continue
 
-            if _load_skip or mpv_proc.poll() is not None:
+            if _load_skip or core.mpv_proc.poll() is not None:
                 _status(f"Skipped  {label}")
-                old = current_idx; current_idx += 1
-                if current_idx < len(tracks):
-                    cursor_idx = current_idx
-                    if _scroll_to(current_idx):
+                old = core.current_idx; core.current_idx += 1
+                if core.current_idx < len(core.tracks):
+                    core.cursor_idx = core.current_idx
+                    if _scroll_to(core.current_idx):
                         _redraw_viewport(); _update_header()
                     else:
                         _draw_track(old, False, False, False)
-                        _draw_track(current_idx, True, False, True)
+                        _draw_track(core.current_idx, True, False, True)
                         sys.stdout.flush()
                     _update_lyric_header()
                 continue
 
-            _status(f"{_cache_mark}Playing  [{current_idx + 1}/{len(tracks)}]  {label}")
+            _status(f"{_cache_mark}Playing  [{core.current_idx + 1}/{len(core.tracks)}]  {label}")
 
             # reset lyric state for new track
-            _lyric["line"] = None
-            _lyric["off"]  = 0
-            _lyric["pos"]  = None
-            _lyric["mood"] = "calm"
-            _lyric["anim_t"] = 0
+            core.lyric["line"] = None
+            core.lyric["off"]  = 0
+            core.lyric["pos"]  = None
+            core.lyric["mood"] = "calm"
+            core.lyric["anim_t"] = 0
             num_buf = ""; num_ts = 0.0
-            _last_pos_ts  = 0.0   # last mpv query time
-            _last_step_ts = 0.0   # last marquee step time
-            _prev_lrc_line: Optional[str] = None
+            core.last_pos_ts  = 0.0   # last mpv query time
+            core.last_step_ts = 0.0   # last marquee step time
+            core.prev_lrc_line = None
 
             def _tick_lyric() -> None:
                 """Advance marquee + update lyric line; redraw playing row."""
-                nonlocal _last_pos_ts, _prev_lrc_line
                 # Refresh position + lyric line from mpv every ~1 s
                 now2 = time.time()
-                if now2 - _last_pos_ts >= 1.0:
-                    _last_pos_ts = now2
+                if now2 - core.last_pos_ts >= 1.0:
+                    core.last_pos_ts = now2
                     pos = _get_mpv_pos()
                     if pos is not None:
-                        _lyric["pos"] = pos
+                        core.lyric["pos"] = pos
                         _lrc = _active_lrc()
-                        if _lrc_ready[0] and _lrc:
-                            _lyric["line"] = _lyr.current_line(_lrc, pos)
+                        if core.lrc_ready and _lrc:
+                            core.lyric["line"] = _lyr.current_line(_lrc, pos)
                             # Track current lyric index for the panel
-                            _lyric["idx"] = None
+                            core.lyric["idx"] = None
                             for j in range(len(_lrc) - 1, -1, -1):
                                 if pos >= _lrc[j][0]:
-                                    _lyric["idx"] = j
+                                    core.lyric["idx"] = j
                                     break
                 # Advance marquee offset (only when panel closed)
-                if _lyric["line"] and not lyric_panel_on:
-                    if _lyric["line"] != _prev_lrc_line:
-                        _lyric["off"] = 0
-                        _prev_lrc_line = _lyric["line"]
-                    pw = _cjk_width(_lyric["line"]) + 4
-                    _lyric["off"] = (_lyric["off"] + 1) % max(1, pw)
+                if core.lyric["line"] and not core.lyric_panel_on:
+                    if core.lyric["line"] != core.prev_lrc_line:
+                        core.lyric["off"] = 0
+                        core.prev_lrc_line = core.lyric["line"]
+                    pw = _cjk_width(core.lyric["line"]) + 4
+                    core.lyric["off"] = (core.lyric["off"] + 1) % max(1, pw)
                 # Redraw the playing row in-place
-                _draw_track(current_idx, True, paused, cursor_idx == current_idx)
+                _draw_track(core.current_idx, True, core.paused, core.cursor_idx == core.current_idx)
                 # Update lyric panel column if open
-                if lyric_panel_on and _panel_widths:
-                    _, plw, lw = _panel_widths
-                    _lyric["anim_t"] += 1
-                    _draw_lyric_panel(_active_lrc(), _lyric.get("idx"), plw, lw, vh,
-                                      _lyric["anim_t"], _lyric["mood"])
+                if core.lyric_panel_on and core.panel_widths:
+                    _, plw, lw = core.panel_widths
+                    core.lyric["anim_t"] += 1
+                    _draw_lyric_panel(_active_lrc(), core.lyric.get("idx"), plw, lw, core.vh,
+                                      core.lyric["anim_t"], core.lyric["mood"])
                 sys.stdout.flush()
 
             while True:
@@ -1393,39 +1441,39 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                 now = time.time()
 
                 # Advance lyric marquee every 0.3 s
-                if now - _last_step_ts >= 0.3:
-                    _last_step_ts = now
-                    if not num_buf and not paused:
+                if now - core.last_step_ts >= 0.3:
+                    core.last_step_ts = now
+                    if not num_buf and not core.paused:
                         _tick_lyric()
 
                 if num_buf and now - num_ts > 1.5:
                     target = int(num_buf) - 1; num_buf = ""
-                    if 0 <= target < len(tracks) and target != current_idx:
+                    if 0 <= target < len(core.tracks) and target != core.current_idx:
                         _jump_to(target); break
-                    _status(f"{_cache_mark}Playing  [{current_idx + 1}/{len(tracks)}]  {label}")
+                    _status(f"{_cache_mark}Playing  [{core.current_idx + 1}/{len(core.tracks)}]  {label}")
 
                 key = key_reader.consume()
                 if key == "q":
                     stop_current(); sys.stdout.write(_NL); return
 
                 elif key == "p":
-                    paused = not paused; _mpv_pause(paused)
-                    state = "Paused " if paused else "Playing"
-                    _status(f"{_cache_mark}{state}  [{current_idx + 1}/{len(tracks)}]  {label}")
-                    if not paused:
+                    core.paused = not core.paused; _mpv_pause(core.paused)
+                    state = "Paused " if core.paused else "Playing"
+                    _status(f"{_cache_mark}{state}  [{core.current_idx + 1}/{len(core.tracks)}]  {label}")
+                    if not core.paused:
                         # Force immediate re-sync of lyric line/idx and reset marquee
-                        _last_pos_ts = 0.0
-                        _lyric["off"] = 0
-                        _prev_lrc_line = None
+                        core.last_pos_ts = 0.0
+                        core.lyric["off"] = 0
+                        core.prev_lrc_line = None
                         _tick_lyric()
                     else:
-                        _draw_track(current_idx, True, paused, cursor_idx == current_idx)
+                        _draw_track(core.current_idx, True, core.paused, core.cursor_idx == core.current_idx)
                     sys.stdout.flush()
 
                 elif key in (",", ".", "<", ">"):
                     delta = {",": -5.0, ".": +5.0, "<": -30.0, ">": +30.0}[key]
-                    duration = float(tracks[current_idx].duration_seconds or 0)
-                    cur_pos = _lyric.get("pos")
+                    duration = float(core.tracks[core.current_idx].duration_seconds or 0)
+                    cur_pos = core.lyric.get("pos")
                     if cur_pos is None:
                         cur_pos = _get_mpv_pos()
                     # Clamp: never below 0; never past (duration - 1) to avoid auto-advance
@@ -1444,7 +1492,7 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                     sign = "+" if delta > 0 else ""
                     new_pos_q = _get_mpv_pos()
                     if new_pos_q is not None:
-                        _lyric["pos"] = new_pos_q
+                        core.lyric["pos"] = new_pos_q
                         if duration > 0:
                             hint = f"{arrow} {sign}{int(delta)}s → {_fmt_dur(int(new_pos_q))} / {_fmt_dur(int(duration))}"
                         else:
@@ -1453,114 +1501,114 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                         hint = f"{arrow} {sign}{int(delta)}s"
                     _status(hint)
                     # Immediate lyric resync + redraw (reuse the poll-tick path)
-                    _last_pos_ts = 0.0
-                    _prev_lrc_line = None
+                    core.last_pos_ts = 0.0
+                    core.prev_lrc_line = None
                     _tick_lyric()
 
                 elif key == "l":
-                    if not lyric_panel_on:
+                    if not core.lyric_panel_on:
                         pw = _compute_panel_widths()
                         if pw is None:
                             _status("Terminal too narrow for lyrics panel")
                         else:
-                            lyric_panel_on = True
-                            _panel_widths = pw
+                            core.lyric_panel_on = True
+                            core.panel_widths = pw
                             _, plw, lw = pw
                             _full_repaint(True, plw, lw)
-                            _status(f"{_cache_mark}Playing  [{current_idx + 1}/{len(tracks)}]  {label}")
+                            _status(f"{_cache_mark}Playing  [{core.current_idx + 1}/{len(core.tracks)}]  {label}")
                     else:
-                        lyric_panel_on = False
-                        _panel_widths = None
+                        core.lyric_panel_on = False
+                        core.panel_widths = None
                         _full_repaint(False, _IW_NORMAL, 0)
-                        _status(f"{_cache_mark}Playing  [{current_idx + 1}/{len(tracks)}]  {label}")
+                        _status(f"{_cache_mark}Playing  [{core.current_idx + 1}/{len(core.tracks)}]  {label}")
 
                 elif key == "+":
-                    if _appending[0]:
+                    if core.appending:
                         _status("Already fetching…")
                     else:
-                        _appending[0] = True
+                        core.appending = True
                         _status("Fetching more…")
                         threading.Thread(target=_do_append, daemon=True).start()
 
                 elif key == "d":
-                    del_idx = cursor_idx
-                    if len(tracks) == 1:
+                    del_idx = core.cursor_idx
+                    if len(core.tracks) == 1:
                         stop_current()
                         sys.stdout.write(_NL)
                         print("Playlist is now empty.")
                         return
-                    deleted_playing = (del_idx == current_idx)
-                    tracks.pop(del_idx)
+                    deleted_playing = (del_idx == core.current_idx)
+                    core.tracks.pop(del_idx)
                     # Fix up indices: any index > del_idx decrements by 1
-                    if current_idx > del_idx:
-                        current_idx -= 1
-                    new_cursor = cursor_idx - 1 if cursor_idx > del_idx else cursor_idx
-                    cursor_idx = min(new_cursor, len(tracks) - 1)
+                    if core.current_idx > del_idx:
+                        core.current_idx -= 1
+                    new_cursor = core.cursor_idx - 1 if core.cursor_idx > del_idx else core.cursor_idx
+                    core.cursor_idx = min(new_cursor, len(core.tracks) - 1)
                     if deleted_playing:
                         stop_current()
-                        current_idx = min(del_idx, len(tracks) - 1)
-                        cursor_idx = current_idx
-                        paused = False
+                        core.current_idx = min(del_idx, len(core.tracks) - 1)
+                        core.cursor_idx = core.current_idx
+                        core.paused = False
                         break
                     else:
-                        _scroll_to(cursor_idx)
+                        _scroll_to(core.cursor_idx)
                         _redraw_viewport(); _update_header()
-                        _status(f"Deleted  [{len(tracks)} tracks remain]")
+                        _status(f"Deleted  [{len(core.tracks)} tracks remain]")
 
                 elif key == "s":
                     try:
                         from autoplaylist import playlist as _pl
-                        _pl.save(playlist_name, tracks, prompt)
-                        _status(f"Saved  {playlist_name}  [{len(tracks)} tracks]")
+                        _pl.save(core.playlist_name, core.tracks, core.prompt)
+                        _status(f"Saved  {core.playlist_name}  [{len(core.tracks)} tracks]")
                     except Exception as e:
                         _status(f"Save failed: {str(e)[:60]}")
 
                 elif key == "y":
-                    n_cands = len(_lrc_candidates)
+                    n_cands = len(core.lrc_candidates)
                     if n_cands == 0:
                         _status("No lyrics available")
                     elif n_cands == 1:
                         _status("Lyrics 1/1  (only source)")
                     else:
-                        _lrc_idx[0] = (_lrc_idx[0] + 1) % n_cands
-                        _lyric["line"] = None
-                        _lyric["off"] = 0
-                        _lyric["idx"] = None
-                        if lyric_panel_on and _panel_widths:
-                            _, plw, lw = _panel_widths
-                            _draw_lyric_panel(_active_lrc(), None, plw, lw, vh,
-                                              _lyric["anim_t"], _lyric["mood"])
+                        core.lrc_idx = (core.lrc_idx + 1) % n_cands
+                        core.lyric["line"] = None
+                        core.lyric["off"] = 0
+                        core.lyric["idx"] = None
+                        if core.lyric_panel_on and core.panel_widths:
+                            _, plw, lw = core.panel_widths
+                            _draw_lyric_panel(_active_lrc(), None, plw, lw, core.vh,
+                                              core.lyric["anim_t"], core.lyric["mood"])
                             sys.stdout.flush()
-                        _status(f"Lyrics {_lrc_idx[0] + 1}/{n_cands}")
+                        _status(f"Lyrics {core.lrc_idx + 1}/{n_cands}")
                         # Persist preference: put selected candidate first in cache
-                        _t = tracks[current_idx]
-                        idx = _lrc_idx[0]
-                        if idx != 0 and _lrc_candidates:
+                        _t = core.tracks[core.current_idx]
+                        idx = core.lrc_idx
+                        if idx != 0 and core.lrc_candidates:
                             from autoplaylist import cache as _cache
-                            reordered = _lrc_candidates[idx:] + _lrc_candidates[:idx]
+                            reordered = core.lrc_candidates[idx:] + core.lrc_candidates[:idx]
                             _cache.save_lyrics(_t.artist, _t.title, reordered)
-                            _lrc_candidates[:] = reordered
-                            _lrc_idx[0] = 0
+                            core.lrc_candidates = reordered
+                            core.lrc_idx = 0
 
                 elif key == "Y":
                     # Clear cached lyrics for current track and re-fetch
-                    _t = tracks[current_idx]
+                    _t = core.tracks[core.current_idx]
                     from autoplaylist import cache as _cache
                     _cache.save_lyrics(_t.artist, _t.title, [])
-                    _lrc_candidates.clear()
-                    _lrc_ready[0] = False
-                    _lrc_idx[0] = 0
-                    _lyric.update({"line": None, "off": 0, "idx": None})
+                    core.lrc_candidates = []
+                    core.lrc_ready = False
+                    core.lrc_idx = 0
+                    core.lyric.update({"line": None, "off": 0, "idx": None})
                     # Immediately blank the lyrics panel
-                    if lyric_panel_on and _panel_widths:
-                        _, plw, lw = _panel_widths
-                        _draw_lyric_panel([], None, plw, lw, vh,
-                                          _lyric["anim_t"], _lyric["mood"])
+                    if core.lyric_panel_on and core.panel_widths:
+                        _, plw, lw = core.panel_widths
+                        _draw_lyric_panel([], None, plw, lw, core.vh,
+                                          core.lyric["anim_t"], core.lyric["mood"])
                         sys.stdout.flush()
                     _status("Refreshing lyrics…")
                     def _refresh_and_notify(artist: str, title: str) -> None:
                         _fetch_lyrics(artist, title)
-                        n = len(_lrc_candidates)
+                        n = len(core.lrc_candidates)
                         if n > 0:
                             _status(f"Lyrics {n} source(s) found — press [y] to cycle")
                         else:
@@ -1572,121 +1620,121 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
 
                 elif key == "r":
                     modes = ["seq", "repeat", "shuffle"]
-                    play_mode = modes[(modes.index(play_mode) + 1) % 3]
+                    core.play_mode = modes[(modes.index(core.play_mode) + 1) % 3]
                     mode_names = {"seq": "Sequential →→", "repeat": "Repeat one ↺", "shuffle": "Shuffle ⇄"}
-                    if lyric_panel_on and _panel_widths:
-                        _, plw, lw = _panel_widths
+                    if core.lyric_panel_on and core.panel_widths:
+                        _, plw, lw = core.panel_widths
                         _full_repaint(True, plw, lw)
                     else:
                         _full_repaint(False, _IW, 0)
-                    _status(f"Mode: {mode_names[play_mode]}")
+                    _status(f"Mode: {mode_names[core.play_mode]}")
 
                 elif key in ("[", "]"):
-                    if len(playlists) == 1:
+                    if len(core.playlists) == 1:
                         _status("Only one playlist")
                     else:
                         try:
                             from autoplaylist import playlist as _pl
-                            _pl.save(playlist_name, tracks, prompt)
+                            _pl.save(core.playlist_name, core.tracks, core.prompt)
                         except Exception:
                             pass
                         stop_current()
-                        _switch_tab[0] = -1 if key == "[" else 1
+                        core.switch_tab = -1 if key == "[" else 1
                         break
 
                 elif key == "n":
-                    stop_current(); old = current_idx; current_idx += 1; paused = False
-                    if current_idx < len(tracks):
-                        cursor_idx = current_idx
-                        if _scroll_to(current_idx):
+                    stop_current(); old = core.current_idx; core.current_idx += 1; core.paused = False
+                    if core.current_idx < len(core.tracks):
+                        core.cursor_idx = core.current_idx
+                        if _scroll_to(core.current_idx):
                             _redraw_viewport(); _update_header()
                         else:
                             _draw_track(old, False, False, False)
-                            _draw_track(current_idx, True, False, True)
+                            _draw_track(core.current_idx, True, False, True)
                             sys.stdout.flush()
                         _update_lyric_header()
                     break
 
                 elif key == "UP":
-                    new_cur = max(0, cursor_idx - 1)
-                    if new_cur != cursor_idx:
-                        old_cur = cursor_idx; cursor_idx = new_cur
+                    new_cur = max(0, core.cursor_idx - 1)
+                    if new_cur != core.cursor_idx:
+                        old_cur = core.cursor_idx; core.cursor_idx = new_cur
                         if _scroll_to(new_cur):
                             _redraw_viewport(); _update_header()
                         else:
-                            _draw_track(old_cur, old_cur == current_idx,
-                                        paused and old_cur == current_idx, False)
-                            _draw_track(new_cur, new_cur == current_idx,
-                                        paused and new_cur == current_idx, True)
+                            _draw_track(old_cur, old_cur == core.current_idx,
+                                        core.paused and old_cur == core.current_idx, False)
+                            _draw_track(new_cur, new_cur == core.current_idx,
+                                        core.paused and new_cur == core.current_idx, True)
                             sys.stdout.flush()
-                        _status(f"Select   [{new_cur + 1}/{len(tracks)}]  {_make_label(tracks[new_cur], 55)}")
+                        _status(f"Select   [{new_cur + 1}/{len(core.tracks)}]  {_make_label(core.tracks[new_cur], 55)}")
 
                 elif key == "DOWN":
-                    new_cur = min(len(tracks) - 1, cursor_idx + 1)
-                    if new_cur != cursor_idx:
-                        old_cur = cursor_idx; cursor_idx = new_cur
+                    new_cur = min(len(core.tracks) - 1, core.cursor_idx + 1)
+                    if new_cur != core.cursor_idx:
+                        old_cur = core.cursor_idx; core.cursor_idx = new_cur
                         if _scroll_to(new_cur):
                             _redraw_viewport(); _update_header()
                         else:
-                            _draw_track(old_cur, old_cur == current_idx,
-                                        paused and old_cur == current_idx, False)
-                            _draw_track(new_cur, new_cur == current_idx,
-                                        paused and new_cur == current_idx, True)
+                            _draw_track(old_cur, old_cur == core.current_idx,
+                                        core.paused and old_cur == core.current_idx, False)
+                            _draw_track(new_cur, new_cur == core.current_idx,
+                                        core.paused and new_cur == core.current_idx, True)
                             sys.stdout.flush()
-                        _status(f"Select   [{new_cur + 1}/{len(tracks)}]  {_make_label(tracks[new_cur], 55)}")
+                        _status(f"Select   [{new_cur + 1}/{len(core.tracks)}]  {_make_label(core.tracks[new_cur], 55)}")
 
                 elif key == "RIGHT":
-                    new_vs = min(len(tracks) - vh, view_start[0] + vh)
-                    new_cur = min(len(tracks) - 1, new_vs)
-                    if new_vs != view_start[0]:
-                        cursor_idx = new_cur
-                        view_start[0] = new_vs
+                    new_vs = min(len(core.tracks) - core.vh, core.view_start + core.vh)
+                    new_cur = min(len(core.tracks) - 1, new_vs)
+                    if new_vs != core.view_start:
+                        core.cursor_idx = new_cur
+                        core.view_start = new_vs
                         _redraw_viewport(); _update_header()
-                        _status(f"Select   [{new_cur + 1}/{len(tracks)}]  {_make_label(tracks[new_cur], 55)}")
+                        _status(f"Select   [{new_cur + 1}/{len(core.tracks)}]  {_make_label(core.tracks[new_cur], 55)}")
 
                 elif key == "LEFT":
-                    new_vs = max(0, view_start[0] - vh)
+                    new_vs = max(0, core.view_start - core.vh)
                     new_cur = new_vs
-                    if new_vs != view_start[0]:
-                        cursor_idx = new_cur
-                        view_start[0] = new_vs
+                    if new_vs != core.view_start:
+                        core.cursor_idx = new_cur
+                        core.view_start = new_vs
                         _redraw_viewport(); _update_header()
-                        _status(f"Select   [{new_cur + 1}/{len(tracks)}]  {_make_label(tracks[new_cur], 55)}")
+                        _status(f"Select   [{new_cur + 1}/{len(core.tracks)}]  {_make_label(core.tracks[new_cur], 55)}")
 
                 elif key in ("\r", "\n"):
                     if num_buf:
                         target = int(num_buf) - 1; num_buf = ""
                     else:
-                        target = cursor_idx
-                    if 0 <= target < len(tracks) and target != current_idx:
+                        target = core.cursor_idx
+                    if 0 <= target < len(core.tracks) and target != core.current_idx:
                         _jump_to(target); break
-                    num_buf = ""; _status(f"{_cache_mark}Playing  [{current_idx + 1}/{len(tracks)}]  {label}")
+                    num_buf = ""; _status(f"{_cache_mark}Playing  [{core.current_idx + 1}/{len(core.tracks)}]  {label}")
 
                 elif key and key.isdigit():
                     num_buf = (num_buf + key) if num_buf and now - num_ts < 1.5 else key
                     num_ts = now
                     _status(f"Goto     [{num_buf}]  — add digits or Enter")
 
-                if mpv_proc and mpv_proc.poll() is not None:
-                    if play_mode == "repeat":
+                if core.mpv_proc and core.mpv_proc.poll() is not None:
+                    if core.play_mode == "repeat":
                         # Loop the same track: reset lyric state and restart
-                        _lyric.update({"line": None, "off": 0, "idx": None,
-                                       "pos": None, "mood": "calm", "anim_t": 0})
+                        core.lyric.update({"line": None, "off": 0, "idx": None,
+                                           "pos": None, "mood": "calm", "anim_t": 0})
                         break
-                    old = current_idx
-                    if play_mode == "shuffle" and len(tracks) > 1:
+                    old = core.current_idx
+                    if core.play_mode == "shuffle" and len(core.tracks) > 1:
                         import random as _random
-                        candidates = [i for i in range(len(tracks)) if i != current_idx]
-                        current_idx = _random.choice(candidates)
+                        candidates = [i for i in range(len(core.tracks)) if i != core.current_idx]
+                        core.current_idx = _random.choice(candidates)
                     else:
-                        current_idx += 1
-                    if current_idx < len(tracks):
-                        cursor_idx = current_idx
-                        if _scroll_to(current_idx):
+                        core.current_idx += 1
+                    if core.current_idx < len(core.tracks):
+                        core.cursor_idx = core.current_idx
+                        if _scroll_to(core.current_idx):
                             _redraw_viewport(); _update_header()
                         else:
                             _draw_track(old, False, False, False)
-                            _draw_track(current_idx, True, False, True)
+                            _draw_track(core.current_idx, True, False, True)
                             sys.stdout.flush()
                         _update_lyric_header()
                     break
