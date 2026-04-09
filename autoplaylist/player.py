@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import select
 import signal
 import socket
@@ -886,6 +887,85 @@ class PlayerCore:
     ytdlp_proc: Any = None
     mpv_proc: Any = None
 
+    # ── event loop plumbing (2b) ──
+    # _cmd_q carries commands/internal signals into core.run().
+    # _ui_q carries events back out to the UI main loop.
+    # _watch_active guards the natural-mpv-exit watcher: True only while
+    # the UI main loop wants passive auto-advance on current mpv_proc.
+    _cmd_q: Any = None
+    _ui_q: Any = None
+    _stop_ev: Any = None
+    _run_thread: Any = None
+    _watch_active: bool = False
+
+    def __post_init__(self) -> None:
+        self._cmd_q = queue.Queue()
+        self._ui_q = queue.Queue()
+        self._stop_ev = threading.Event()
+
+    def post(self, msg: Any) -> None:
+        """Thread-safe: enqueue a message for core.run() to process."""
+        self._cmd_q.put(msg)
+
+    def arm_watcher(self) -> None:
+        """Called by UI after launching mpv: enable passive-exit detection."""
+        self._watch_active = True
+
+    def disarm_watcher(self) -> None:
+        """Called by UI before user-initiated stop_current(): silence watcher."""
+        self._watch_active = False
+
+    def start(self) -> None:
+        """Spawn core.run() in a background thread."""
+        self._run_thread = threading.Thread(target=self.run, daemon=True)
+        self._run_thread.start()
+
+    def shutdown(self) -> None:
+        """Signal run() to exit and join."""
+        self._stop_ev.set()
+        self._cmd_q.put(("__stop__",))
+        if self._run_thread is not None:
+            self._run_thread.join(timeout=0.5)
+
+    def run(self) -> None:
+        """Event loop. Single writer for fields touched inside handlers.
+
+        Currently handles:
+        - Natural mpv exit detection (passive poll, gated by _watch_active).
+          On detection, runs the auto-advance decision and posts a UI event:
+            ("repeat",)  → UI should restart the same track
+            ("next",)    → UI should break inner loop and load core.current_idx
+          Lyric reset for repeat is done here (preserves prior behavior).
+        """
+        while not self._stop_ev.is_set():
+            try:
+                msg = self._cmd_q.get(timeout=0.1)
+            except queue.Empty:
+                msg = None
+            if isinstance(msg, tuple) and msg and msg[0] == "__stop__":
+                return
+            # Passive mpv exit watcher
+            if (self._watch_active
+                    and self.mpv_proc is not None
+                    and self.mpv_proc.poll() is not None):
+                self._watch_active = False
+                self._handle_track_ended()
+
+    def _handle_track_ended(self) -> None:
+        """Runs inside core.run() thread. Decides auto-advance, posts to _ui_q."""
+        if self.play_mode == "repeat":
+            self.lyric.update({"line": None, "off": 0, "idx": None,
+                               "pos": None, "mood": "calm", "anim_t": 0})
+            self._ui_q.put(("repeat",))
+            return
+        prev = self.current_idx
+        nxt = self.pick_next_idx()
+        if nxt is not None:
+            self.current_idx = nxt
+        else:
+            self.current_idx = len(self.tracks)  # sentinel: seq off end
+        self._ui_q.put(("next", prev))
+
     def pick_next_idx(self) -> Optional[int]:
         """Decide the next track index after the current one ends naturally.
 
@@ -1225,10 +1305,14 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
     # ── playback state ────────────────────────────────────────────────────────
     key_reader  = _KeyReader()
     key_reader.start()
+    core.start()  # spawn core.run() event loop thread
 
     _orig_sigint = signal.getsignal(signal.SIGINT)
 
     def stop_current() -> None:
+        # User-initiated stop: silence the passive watcher so it doesn't
+        # fire a spurious ("next",) event on the mpv exit we're about to cause.
+        core.disarm_watcher()
         _mpv_quit()
         # Send SIGKILL to both first, then wait — avoids serial blocking
         if core.mpv_proc and core.mpv_proc.poll() is None:
@@ -1331,6 +1415,13 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
             _status(f"Loading  {label}")
             core.ytdlp_proc, core.mpv_proc = _launch_mpv(core.tracks[core.current_idx].youtube_url, debug=core.debug)
             _cache_mark = "⚡ " if core.ytdlp_proc is None else ""
+            # Drain any stale ui events from prior track, then arm watcher.
+            while True:
+                try:
+                    core._ui_q.get_nowait()
+                except queue.Empty:
+                    break
+            core.arm_watcher()
 
             # Fetch lyrics candidates in background while track loads.
             # Per-track state lives on `core` too — reset at each track load.
@@ -1398,6 +1489,18 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                 continue
 
             if _load_skip or core.mpv_proc.poll() is not None:
+                # Cache-miss / launch failure. If the watcher already fired
+                # (core.run() saw the exit first), it will have advanced
+                # current_idx and posted ("next",). In that case, drain the
+                # ui event and continue — don't double-advance.
+                if not core._watch_active:
+                    try:
+                        core._ui_q.get_nowait()
+                    except queue.Empty:
+                        pass
+                    _status(f"Skipped  {label}")
+                    continue
+                core.disarm_watcher()
                 _status(f"Skipped  {label}")
                 old = core.current_idx; core.current_idx += 1
                 if core.current_idx < len(core.tracks):
@@ -1738,32 +1841,36 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                     num_ts = now
                     _status(f"Goto     [{num_buf}]  — add digits or Enter")
 
-                if core.mpv_proc and core.mpv_proc.poll() is not None:
-                    nxt = core.pick_next_idx()
-                    if core.play_mode == "repeat":
-                        # Loop the same track: reset lyric state and restart
-                        core.lyric.update({"line": None, "off": 0, "idx": None,
-                                           "pos": None, "mood": "calm", "anim_t": 0})
+                # Poll core event queue for natural-exit notifications.
+                # core.run() detects mpv exit + runs pick_next_idx() and posts:
+                #   ("repeat",) — same track restart (lyric state already reset)
+                #   ("next",)   — core.current_idx is already advanced; repaint + break
+                try:
+                    ev = core._ui_q.get_nowait()
+                except queue.Empty:
+                    ev = None
+                if ev is not None:
+                    tag = ev[0] if isinstance(ev, tuple) else ev
+                    if tag == "repeat":
                         break
-                    if nxt is not None:
-                        old = core.current_idx
-                        core.current_idx = nxt
-                        core.cursor_idx = core.current_idx
-                        if _scroll_to(core.current_idx):
-                            _redraw_viewport(); _update_header()
-                        else:
-                            _draw_track(old, False, False, False)
-                            _draw_track(core.current_idx, True, False, True)
-                            sys.stdout.flush()
-                        _update_lyric_header()
-                    else:
-                        core.current_idx = len(core.tracks)  # sentinel: seq ran off end
-                    break
+                    if tag == "next":
+                        old = ev[1]
+                        if core.current_idx < len(core.tracks):
+                            core.cursor_idx = core.current_idx
+                            if _scroll_to(core.current_idx):
+                                _redraw_viewport(); _update_header()
+                            else:
+                                _draw_track(old, False, False, False)
+                                _draw_track(core.current_idx, True, False, True)
+                                sys.stdout.flush()
+                            _update_lyric_header()
+                        break
 
     finally:
         signal.signal(signal.SIGINT, _orig_sigint)
         key_reader.stop()
         stop_current()
+        core.shutdown()
         _restore_terminal()
         sys.stdout.write(_NL)
 
