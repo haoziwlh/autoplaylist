@@ -87,40 +87,40 @@
 
 ## 3. 第二步：循环切分 + 事件订阅（commit 2）
 
-- [ ] 3.1 在 `PlayerCore` 内新增 `queue.Queue` 命令通道与 `run()` 事件循环方法；`run()` 跑在后台线程。
-- [ ] 3.2 定义命令方法（全部线程安全，内部 `post` 到队列）：`toggle_pause()` / `next()` / `prev()` / `goto(idx)` / `select(idx)` / `seek(delta_seconds)` / `set_mode(mode)` / `switch_tab(direction)` / `quit()`。
-- [ ] 3.3 定义事件类型（dataclass 或 NamedTuple）：`TrackStarted` / `TrackEnded` / `Paused` / `Resumed` / `PositionTick` / `LyricLineChanged` / `ViewportChanged` / `CursorMoved` / `ModeChanged` / `TabSwitched` / `Quit`。
-- [ ] 3.4 定义 `PlayerSnapshot`（值类型），包含 UI 渲染所需的所有只读字段。实现 `PlayerCore.snapshot() -> PlayerSnapshot`，语义为"在事件循环线程以外也可安全调用，内部通过 `post` + 回传或拷贝保证"。
-- [ ] 3.5 实现 `subscribe(callback)`：事件不在 core 线程直接回调，而是塞进一个 UI 侧的 `Queue[Event]`，由主线程在 select 循环里 poll（Decision 4）。
-- [ ] 3.6 将原 while 循环中的**调度**部分迁入 `PlayerCore.run()` 的命令/事件处理分支：
-  - [ ] 3.6.1 mpv 退出监听线程改为只 `post(TrackEndedInternal)`；auto-advance 决策在 core 线程内做。
-  - [ ] 3.6.2 shuffle / repeat / seq 的下一首选择逻辑迁入 core。
-  - [ ] 3.6.3 seek 命令改为 core 调用 mpv IPC，位置 clamp 逻辑迁入 core。
-  - [ ] 3.6.4 tab switch 改为命令方法；playlist 切换时的状态重置集中在 core 的 `_on_switch_tab()` 里。
-  - [ ] 3.6.5 歌词抓取线程 / mood 动画定时器改为向 core `post` 事件，不直接写 `_lyric`。
-- [ ] 3.7 原 while 循环退化为 **UI 循环**：只做三件事——读 stdin（raw）、分派命令到 core、poll 事件队列并重绘相关区域。
-- [ ] 3.8 键盘分派改为调用 `core.<command>()`，**不再**直接操作状态字段。
-- [ ] 3.9 渲染函数（`_draw_track` / `_redraw_viewport` / `_full_repaint` / 歌词面板 / 状态行 / ⚡ 标记 / mood 动画绘制）**算法不动**，仅把入参从闭包变量改为 `snapshot` 字段。
-- [ ] 3.10 `_launch_mpv` / `_ipc_send` 的调用点从 UI 层迁到 core 层；UI 层不再直接调这两个函数。
-- [ ] 3.11 `PlayerBackend` 抽象决策（Open Question）：先不抽象，直接在 core 内部调 `_launch_mpv` / `_ipc_send`；单测用 `monkeypatch` 替换。若单测实现时发现 monkeypatch 太丑，再回来抽 `PlayerBackend`。
-- [ ] 3.12 新增 `tests/test_player_core.py`，覆盖纯状态机：
-  - [ ] 3.12.1 `next` / `prev` 在 seq 模式的边界（首/末）
-  - [ ] 3.12.2 `next` 在 repeat 模式的行为
-  - [ ] 3.12.3 `next` 在 shuffle 模式的选择域（不重复当前曲目）
-  - [ ] 3.12.4 `seek` 的下限 clamp（不能 <0）与上限 clamp（不应 auto-advance）
-  - [ ] 3.12.5 `set_mode` 在三种模式间切换的幂等性
-  - [ ] 3.12.6 `switch_tab` 时 `current_idx` / `cursor_idx` / `view_start` / `_lyric` 的重置
-  - [ ] 3.12.7 `goto(n)` 越界处理
-- [ ] 3.13 跑第 5 节手动回归 checklist 全项。
-- [ ] 3.14 跑 `pytest` 全绿（含新增 `test_player_core.py`）。
-- [ ] 3.15 提交 commit 2：`refactor(player): split scheduling from UI via PlayerCore event loop`。
+- [x] 3.1 在 `PlayerCore` 内新增 `queue.Queue` 命令通道与 `run()` 事件循环方法；`run()` 跑在后台线程。
+- [x] 3.2 定义命令方法（全部线程安全，内部 `post` 到队列）：`toggle_pause()` / `next()` / `prev()` / `goto(idx)` / `select(idx)` / `seek(delta_seconds)` / `set_mode(mode)` / `switch_tab(direction)` / `quit()`。
+- [x] 3.3 定义事件类型（dataclass 或 NamedTuple）：`TrackStarted` / `TrackEnded` / `Paused` / `Resumed` / `PositionTick` / `LyricLineChanged` / `ViewportChanged` / `CursorMoved` / `ModeChanged` / `TabSwitched` / `Quit`。
+- [x] 3.4 定义 `PlayerSnapshot`（值类型），包含 UI 渲染所需的所有只读字段。实现 `PlayerCore.snapshot() -> PlayerSnapshot`，语义为"在事件循环线程以外也可安全调用，内部通过 `post` + 回传或拷贝保证"。
+- [x] 3.5 实现 `subscribe(callback)`：事件不在 core 线程直接回调，而是塞进一个 UI 侧的 `Queue[Event]`，由主线程在 select 循环里 poll（Decision 4）。
+- [x] 3.6 将原 while 循环中的**调度**部分迁入 `PlayerCore.run()` 的命令/事件处理分支：
+  - [x] 3.6.1 mpv 退出监听线程改为只 `post(TrackEndedInternal)`；auto-advance 决策在 core 线程内做。
+  - [x] 3.6.2 shuffle / repeat / seq 的下一首选择逻辑迁入 core。
+  - [x] 3.6.3 seek 命令改为 core 调用 mpv IPC，位置 clamp 逻辑迁入 core。
+  - [x] 3.6.4 tab switch 改为命令方法；playlist 切换时的状态重置集中在 core 的 `_on_switch_tab()` 里。
+  - [x] 3.6.5 歌词抓取线程 / mood 动画定时器改为向 core `post` 事件，不直接写 `_lyric`。
+- [x] 3.7 原 while 循环退化为 **UI 循环**：只做三件事——读 stdin（raw）、分派命令到 core、poll 事件队列并重绘相关区域。
+- [x] 3.8 键盘分派改为调用 `core.<command>()`，**不再**直接操作状态字段。
+- [x] 3.9 渲染函数（`_draw_track` / `_redraw_viewport` / `_full_repaint` / 歌词面板 / 状态行 / ⚡ 标记 / mood 动画绘制）**算法不动**，仅把入参从闭包变量改为 `snapshot` 字段。
+- [x] 3.10 `_launch_mpv` / `_ipc_send` 的调用点从 UI 层迁到 core 层；UI 层不再直接调这两个函数。
+- [x] 3.11 `PlayerBackend` 抽象决策（Open Question）：先不抽象，直接在 core 内部调 `_launch_mpv` / `_ipc_send`；单测用 `monkeypatch` 替换。若单测实现时发现 monkeypatch 太丑，再回来抽 `PlayerBackend`。
+- [x] 3.12 新增 `tests/test_player_core.py`，覆盖纯状态机：
+  - [x] 3.12.1 `next` / `prev` 在 seq 模式的边界（首/末）
+  - [x] 3.12.2 `next` 在 repeat 模式的行为
+  - [x] 3.12.3 `next` 在 shuffle 模式的选择域（不重复当前曲目）
+  - [x] 3.12.4 `seek` 的下限 clamp（不能 <0）与上限 clamp（不应 auto-advance）
+  - [x] 3.12.5 `set_mode` 在三种模式间切换的幂等性
+  - [x] 3.12.6 `switch_tab` 时 `current_idx` / `cursor_idx` / `view_start` / `_lyric` 的重置
+  - [x] 3.12.7 `goto(n)` 越界处理
+- [x] 3.13 跑第 5 节手动回归 checklist 全项。
+- [x] 3.14 跑 `pytest` 全绿（含新增 `test_player_core.py`）。
+- [x] 3.15 提交 commit 2：`refactor(player): split scheduling from UI via PlayerCore event loop`。
 
 ## 4. 收尾
 
-- [ ] 4.1 `openspec validate decouple-player-core-ui --strict` 通过。
+- [x] 4.1 `openspec validate decouple-player-core-ui --strict` 通过。
 - [ ] 4.2 两个 commit 合并为一个 PR 入 main（不单独发版，Migration Plan 第 3 步）。
 - [ ] 4.3 拆分过程中若发现任何既有 bug，**不在本 change 内修复**；记录到一个新 issue 或 `openspec/changes/<新 change>/proposal.md` 草稿，Non-goal 守住。
-- [ ] 4.4 PR 描述中附上本文件的手动回归 checklist 作为自查列表。
+- [x] 4.4 PR 描述中附上本文件的手动回归 checklist 作为自查列表。
 
 ## 5. 手动回归 checklist（每次 commit 前跑一遍）
 

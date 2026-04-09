@@ -841,7 +841,32 @@ def _box_row(vis: str, disp: str, inner_width: int = -1) -> str:
 # ---------------------------------------------------------------------------
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable, Tuple
+
+
+@dataclass(frozen=True)
+class PlayerSnapshot:
+    """Immutable snapshot of the fields UI rendering needs.
+
+    Returned by ``PlayerCore.snapshot()``. Because the fields are copied
+    (not aliased), UI code can hold a snapshot across redraws without
+    worrying about core state changing underneath it.
+    """
+    playlist_name: str
+    tracks_count: int
+    current_idx: int
+    cursor_idx: int
+    view_start: int
+    paused: bool
+    play_mode: str
+    vh: int
+    lyric_line: Any
+    lyric_pos: Any
+    lyric_idx: Any
+    lyric_mood: str
+    lyric_panel_on: bool
+    appending: bool
+    active_playlist_idx: int
 
 
 @dataclass
@@ -897,11 +922,56 @@ class PlayerCore:
     _stop_ev: Any = None
     _run_thread: Any = None
     _watch_active: bool = False
+    _subscribers: Any = None
 
     def __post_init__(self) -> None:
         self._cmd_q = queue.Queue()
         self._ui_q = queue.Queue()
         self._stop_ev = threading.Event()
+        self._subscribers = []
+
+    def snapshot(self) -> PlayerSnapshot:
+        """Return an immutable snapshot of UI-visible state.
+
+        Safe to call from any thread; reads are racy (no lock) but each
+        field read is atomic in CPython and snapshots are advisory — UI
+        redraws on a timer anyway.
+        """
+        return PlayerSnapshot(
+            playlist_name=self.playlist_name,
+            tracks_count=len(self.tracks),
+            current_idx=self.current_idx,
+            cursor_idx=self.cursor_idx,
+            view_start=self.view_start,
+            paused=self.paused,
+            play_mode=self.play_mode,
+            vh=self.vh,
+            lyric_line=self.lyric.get("line"),
+            lyric_pos=self.lyric.get("pos"),
+            lyric_idx=self.lyric.get("idx"),
+            lyric_mood=self.lyric.get("mood", "calm"),
+            lyric_panel_on=self.lyric_panel_on,
+            appending=self.appending,
+            active_playlist_idx=self.active_idx,
+        )
+
+    def subscribe(self, callback: Callable[[Tuple[Any, ...]], None]) -> None:
+        """Register a listener for state-change events. Callbacks are
+        invoked synchronously from whichever thread mutates state; they
+        must be non-blocking and thread-safe (typical use: enqueue into
+        a UI-side queue and return).
+        """
+        self._subscribers.append(callback)
+
+    def _emit(self, event: Tuple[Any, ...]) -> None:
+        """Notify all subscribers. Exceptions in callbacks are swallowed
+        so one bad listener can't crash playback.
+        """
+        for cb in self._subscribers:
+            try:
+                cb(event)
+            except Exception:
+                pass
 
     def post(self, msg: Any) -> None:
         """Thread-safe: enqueue a message for core.run() to process."""
@@ -998,17 +1068,20 @@ class PlayerCore:
             self.last_pos_ts = 0.0
             self.lyric["off"] = 0
             self.prev_lrc_line = None
+        self._emit(("Paused" if self.paused else "Resumed",))
         return self.paused
 
     def set_mode(self, mode: str) -> None:
         """Set play mode. Caller is responsible for validation."""
         if mode in ("seq", "repeat", "shuffle"):
             self.play_mode = mode
+            self._emit(("ModeChanged", mode))
 
     def cycle_mode(self) -> str:
         """Advance play mode seq → repeat → shuffle → seq. Returns new mode."""
         modes = ["seq", "repeat", "shuffle"]
         self.play_mode = modes[(modes.index(self.play_mode) + 1) % 3]
+        self._emit(("ModeChanged", self.play_mode))
         return self.play_mode
 
     def seek_relative(self, delta: float) -> tuple[Optional[float], Optional[float]]:
@@ -1046,6 +1119,7 @@ class PlayerCore:
         """
         self.stop_current()
         self.switch_tab = -1 if direction < 0 else 1
+        self._emit(("TabSwitched", self.switch_tab))
 
     def select(self, target: int) -> int:
         """Move the cursor to ``target`` (clamped). Returns previous cursor.
@@ -1054,6 +1128,8 @@ class PlayerCore:
         old = self.cursor_idx
         if self.tracks:
             self.cursor_idx = max(0, min(len(self.tracks) - 1, target))
+        if self.cursor_idx != old:
+            self._emit(("CursorMoved", old, self.cursor_idx))
         return old
 
     def jump_to(self, target: int) -> int:
@@ -1070,6 +1146,7 @@ class PlayerCore:
         self.lyric["pos"] = None
         self.lyric["mood"] = "calm"
         self.lyric["anim_t"] = 0
+        self._emit(("TrackStarted", old, target))
         return old
 
     def next_track(self) -> Optional[int]:
@@ -1085,6 +1162,7 @@ class PlayerCore:
         self.paused = False
         if self.current_idx < len(self.tracks):
             self.cursor_idx = self.current_idx
+            self._emit(("TrackStarted", old, self.current_idx))
             return old
         return None
 
