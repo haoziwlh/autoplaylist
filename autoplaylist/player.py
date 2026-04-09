@@ -1889,15 +1889,15 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                                               core.lyric["anim_t"], core.lyric["mood"])
                             sys.stdout.flush()
                         _status(f"Lyrics {core.lrc_idx + 1}/{n_cands}")
-                        # Persist preference: put selected candidate first in cache
+                        # Persist preference: put selected candidate first in cache,
+                        # but keep in-memory list/index untouched so subsequent `y`
+                        # presses can continue advancing past 2/N.
                         _t = core.tracks[core.current_idx]
                         idx = core.lrc_idx
                         if idx != 0 and core.lrc_candidates:
                             from autoplaylist import cache as _cache
                             reordered = core.lrc_candidates[idx:] + core.lrc_candidates[:idx]
                             _cache.save_lyrics(_t.artist, _t.title, reordered)
-                            core.lrc_candidates = reordered
-                            core.lrc_idx = 0
 
                 elif key == "Y":
                     # Clear cached lyrics for current track and re-fetch
