@@ -322,6 +322,15 @@ def _mpv_pause(paused: bool) -> None:
     _ipc_send(["set_property", "pause", paused])
 
 
+def _mpv_seek(delta: float) -> None:
+    """Send a relative seek to mpv via IPC. Caller is responsible for clamping."""
+    _ipc_send(["seek", delta, "relative"])
+
+
+def _mpv_seek_absolute(pos: float) -> None:
+    _ipc_send(["seek", pos, "absolute"])
+
+
 def _mpv_quit() -> None:
     _ipc_send(["quit"])
 
@@ -512,9 +521,9 @@ _BAR_W = 16    # progress bar block width
 # ---------------------------------------------------------------------------
 # full bar: text labels only (no symbols), shown when terminal is wide enough (~92 cols)
 _CTRL_VIS_FULL_OPEN  = ("  [p] pause [n] next [↑↓] sel [←→] pg"
-                         " [↵] play [q] quit [L] lyrics [+] more [d] del [s] save  [[] prev []] next  [y] lyrics src [Y] refresh")
+                         " [↵] play [q] quit [L] lyrics [+] more [d] del [s] save  [[] prev []] next  [y] lyrics src [Y] refresh  [,.] seek")
 _CTRL_VIS_FULL_CLOSE = ("  [p] pause [n] next [↑↓] sel [←→] pg"
-                         " [↵] play [q] quit [l] lyrics [+] more [d] del [s] save  [[] prev []] next  [y] lyrics src")
+                         " [↵] play [q] quit [l] lyrics [+] more [d] del [s] save  [[] prev []] next  [y] lyrics src  [,.] seek")
 # compact: symbols only, fits ≤ 80 (panel-closed box)
 _CTRL_VIS_SHORT_OPEN  = "  [p]⏸  [n]⏭  [↑↓]  [←→]  [↵]▶  [q]✕  [L]♪  [+]  [d]✗  [s]↓  [[]←  []]→"
 _CTRL_VIS_SHORT_CLOSE = "  [p]⏸  [n]⏭  [↑↓]  [←→]  [↵]▶  [q]✕  [l]♪  [+]  [d]✗  [s]↓  [[]←  []]→"
@@ -535,6 +544,7 @@ def _ctrl_bar(avail: int, panel_open: bool, mode: str = "seq") -> tuple[str, str
                 f" {_D}[d]{_R} del {_D}[s]{_R} save"
                 f"  {_D}[[]" f"{_R} prev {_D}[]]" f"{_R} next"
                 f"  {_D}[y]{_R} lyrics src  {_D}[Y]{_R} refresh"
+                f"  {_D}[,.]{_R} seek"
                 f"  {_D}[r]{_R}{icon}")
     else:
         vis = vis_short
@@ -1410,6 +1420,41 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                     else:
                         _draw_track(current_idx, True, paused, cursor_idx == current_idx)
                     sys.stdout.flush()
+
+                elif key in (",", ".", "<", ">"):
+                    delta = {",": -5.0, ".": +5.0, "<": -30.0, ">": +30.0}[key]
+                    duration = float(tracks[current_idx].duration_seconds or 0)
+                    cur_pos = _lyric.get("pos")
+                    if cur_pos is None:
+                        cur_pos = _get_mpv_pos()
+                    # Clamp: never below 0; never past (duration - 1) to avoid auto-advance
+                    if cur_pos is not None:
+                        new_pos = cur_pos + delta
+                        if new_pos < 0:
+                            new_pos = 0.0
+                        if duration > 0 and new_pos > max(0.0, duration - 1.0):
+                            new_pos = max(0.0, duration - 1.0)
+                        _mpv_seek_absolute(new_pos)
+                    else:
+                        # Unknown current position: fall back to relative; mpv will clamp at 0.
+                        _mpv_seek(delta)
+                    # Build status hint
+                    arrow = "⏩" if delta > 0 else "⏪"
+                    sign = "+" if delta > 0 else ""
+                    new_pos_q = _get_mpv_pos()
+                    if new_pos_q is not None:
+                        _lyric["pos"] = new_pos_q
+                        if duration > 0:
+                            hint = f"{arrow} {sign}{int(delta)}s → {_fmt_dur(int(new_pos_q))} / {_fmt_dur(int(duration))}"
+                        else:
+                            hint = f"{arrow} {sign}{int(delta)}s → {_fmt_dur(int(new_pos_q))}"
+                    else:
+                        hint = f"{arrow} {sign}{int(delta)}s"
+                    _status(hint)
+                    # Immediate lyric resync + redraw (reuse the poll-tick path)
+                    _last_pos_ts = 0.0
+                    _prev_lrc_line = None
+                    _tick_lyric()
 
                 elif key == "l":
                     if not lyric_panel_on:
