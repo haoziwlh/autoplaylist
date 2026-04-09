@@ -886,6 +886,29 @@ class PlayerCore:
     ytdlp_proc: Any = None
     mpv_proc: Any = None
 
+    def pick_next_idx(self) -> Optional[int]:
+        """Decide the next track index after the current one ends naturally.
+
+        Returns the next index to play, or None if playback should stop
+        (i.e. sequential mode ran off the end). Pure function of current
+        state; does not mutate self.
+
+        - ``repeat``: returns ``current_idx`` (loop the same track).
+        - ``shuffle``: random choice excluding ``current_idx`` when more
+          than one track exists; otherwise returns ``current_idx``.
+        - ``seq`` (default): ``current_idx + 1`` if in range, else None.
+        """
+        if not self.tracks:
+            return None
+        if self.play_mode == "repeat":
+            return self.current_idx
+        if self.play_mode == "shuffle" and len(self.tracks) > 1:
+            import random as _random
+            candidates = [i for i in range(len(self.tracks)) if i != self.current_idx]
+            return _random.choice(candidates)
+        nxt = self.current_idx + 1
+        return nxt if nxt < len(self.tracks) else None
+
 
 # ---------------------------------------------------------------------------
 # Main player
@@ -1716,19 +1739,15 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                     _status(f"Goto     [{num_buf}]  — add digits or Enter")
 
                 if core.mpv_proc and core.mpv_proc.poll() is not None:
+                    nxt = core.pick_next_idx()
                     if core.play_mode == "repeat":
                         # Loop the same track: reset lyric state and restart
                         core.lyric.update({"line": None, "off": 0, "idx": None,
                                            "pos": None, "mood": "calm", "anim_t": 0})
                         break
-                    old = core.current_idx
-                    if core.play_mode == "shuffle" and len(core.tracks) > 1:
-                        import random as _random
-                        candidates = [i for i in range(len(core.tracks)) if i != core.current_idx]
-                        core.current_idx = _random.choice(candidates)
-                    else:
-                        core.current_idx += 1
-                    if core.current_idx < len(core.tracks):
+                    if nxt is not None:
+                        old = core.current_idx
+                        core.current_idx = nxt
                         core.cursor_idx = core.current_idx
                         if _scroll_to(core.current_idx):
                             _redraw_viewport(); _update_header()
@@ -1737,6 +1756,8 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                             _draw_track(core.current_idx, True, False, True)
                             sys.stdout.flush()
                         _update_lyric_header()
+                    else:
+                        core.current_idx = len(core.tracks)  # sentinel: seq ran off end
                     break
 
     finally:
