@@ -966,6 +966,165 @@ class PlayerCore:
             self.current_idx = len(self.tracks)  # sentinel: seq off end
         self._ui_q.put(("next", prev))
 
+    # ── command methods (2c) ──────────────────────────────────────────────
+    # These are the UI's only path to mutate playback state. All are
+    # synchronous (not yet queue-dispatched) — the contract is "UI never
+    # writes core fields directly". Each method mutates state and issues
+    # mpv IPC as needed; rendering is still the UI's job (commands return
+    # whatever the UI needs to redraw).
+
+    def stop_current(self) -> None:
+        """Kill yt-dlp + mpv for the currently playing track. Disarms the
+        passive exit watcher first to avoid a spurious auto-advance event.
+        """
+        self.disarm_watcher()
+        _mpv_quit()
+        if self.mpv_proc and self.mpv_proc.poll() is None:
+            self.mpv_proc.kill()
+        if self.ytdlp_proc and self.ytdlp_proc.poll() is None:
+            self.ytdlp_proc.kill()
+        if self.mpv_proc:
+            self.mpv_proc.wait()
+        if self.ytdlp_proc:
+            self.ytdlp_proc.wait()
+        self.mpv_proc = self.ytdlp_proc = None
+
+    def toggle_pause(self) -> bool:
+        """Flip paused state and issue mpv pause IPC. Returns new paused."""
+        self.paused = not self.paused
+        _mpv_pause(self.paused)
+        if not self.paused:
+            # Force immediate re-sync of lyric line/idx and reset marquee
+            self.last_pos_ts = 0.0
+            self.lyric["off"] = 0
+            self.prev_lrc_line = None
+        return self.paused
+
+    def set_mode(self, mode: str) -> None:
+        """Set play mode. Caller is responsible for validation."""
+        if mode in ("seq", "repeat", "shuffle"):
+            self.play_mode = mode
+
+    def cycle_mode(self) -> str:
+        """Advance play mode seq → repeat → shuffle → seq. Returns new mode."""
+        modes = ["seq", "repeat", "shuffle"]
+        self.play_mode = modes[(modes.index(self.play_mode) + 1) % 3]
+        return self.play_mode
+
+    def seek_relative(self, delta: float) -> tuple[Optional[float], Optional[float]]:
+        """Seek by ``delta`` seconds, clamped to [0, duration-1] to avoid
+        auto-advance. Returns (new_pos, duration); either may be None if
+        mpv position is unknown.
+        """
+        duration = None
+        if self.tracks and 0 <= self.current_idx < len(self.tracks):
+            duration = float(self.tracks[self.current_idx].duration_seconds or 0) or None
+        cur_pos = self.lyric.get("pos")
+        if cur_pos is None:
+            cur_pos = _get_mpv_pos()
+        if cur_pos is not None:
+            new_pos = cur_pos + delta
+            if new_pos < 0:
+                new_pos = 0.0
+            if duration is not None and new_pos > max(0.0, duration - 1.0):
+                new_pos = max(0.0, duration - 1.0)
+            _mpv_seek_absolute(new_pos)
+        else:
+            _mpv_seek(delta)
+        # Re-query for a fresh pos (mpv may have clamped internally)
+        new_pos_q = _get_mpv_pos()
+        if new_pos_q is not None:
+            self.lyric["pos"] = new_pos_q
+        # Trigger immediate lyric resync on next tick
+        self.last_pos_ts = 0.0
+        self.prev_lrc_line = None
+        return new_pos_q, duration
+
+    def request_switch_tab(self, direction: int) -> None:
+        """Request a playlist tab switch (-1 prev / +1 next). Calls
+        stop_current() internally so the UI main loop picks it up cleanly.
+        """
+        self.stop_current()
+        self.switch_tab = -1 if direction < 0 else 1
+
+    def select(self, target: int) -> int:
+        """Move the cursor to ``target`` (clamped). Returns previous cursor.
+        Does not touch current_idx.
+        """
+        old = self.cursor_idx
+        if self.tracks:
+            self.cursor_idx = max(0, min(len(self.tracks) - 1, target))
+        return old
+
+    def jump_to(self, target: int) -> int:
+        """Stop current track and start playing ``target``. Resets paused,
+        lyric state, cursor. Returns previous current_idx for redraw.
+        """
+        self.stop_current()
+        old = self.current_idx
+        self.current_idx = self.cursor_idx = target
+        self.paused = False
+        self.lyric["line"] = None
+        self.lyric["off"] = 0
+        self.lyric["idx"] = None
+        self.lyric["pos"] = None
+        self.lyric["mood"] = "calm"
+        self.lyric["anim_t"] = 0
+        return old
+
+    def next_track(self) -> Optional[int]:
+        """Advance to current_idx + 1 unconditionally (the ``n`` key).
+        Unlike pick_next_idx(), does not respect play_mode. Returns the
+        previous current_idx if advanced, or None if already at the end.
+        """
+        if not self.tracks:
+            return None
+        self.stop_current()
+        old = self.current_idx
+        self.current_idx += 1
+        self.paused = False
+        if self.current_idx < len(self.tracks):
+            self.cursor_idx = self.current_idx
+            return old
+        return None
+
+    def delete_cursor(self) -> tuple[int, bool, bool]:
+        """Delete the track at cursor_idx. Returns
+        (deleted_idx, was_playing, empty_now). If empty_now is True, the
+        caller should also call stop_current() and exit cleanly.
+        """
+        del_idx = self.cursor_idx
+        if len(self.tracks) == 1:
+            return del_idx, del_idx == self.current_idx, True
+        was_playing = (del_idx == self.current_idx)
+        self.tracks.pop(del_idx)
+        if self.current_idx > del_idx:
+            self.current_idx -= 1
+        new_cursor = self.cursor_idx - 1 if self.cursor_idx > del_idx else self.cursor_idx
+        self.cursor_idx = min(new_cursor, len(self.tracks) - 1)
+        if was_playing:
+            self.stop_current()
+            self.current_idx = min(del_idx, len(self.tracks) - 1)
+            self.cursor_idx = self.current_idx
+            self.paused = False
+        return del_idx, was_playing, False
+
+    def begin_append(self) -> bool:
+        """Mark an append as in-flight. Returns False if one is already
+        running (UI should show a status message)."""
+        if self.appending:
+            return False
+        self.appending = True
+        return True
+
+    def end_append(self) -> None:
+        """Called by the background append thread when done."""
+        self.appending = False
+
+    def request_quit(self) -> None:
+        """Stop current playback and signal the UI to exit on next loop."""
+        self.stop_current()
+
     def pick_next_idx(self) -> Optional[int]:
         """Decide the next track index after the current one ends naturally.
 
@@ -1279,7 +1438,7 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
             _log(f"exception: {e}\n{tb}")
             _status(f"Append failed: {str(e)[:60]}")
         finally:
-            core.appending = False
+            core.end_append()
 
     # ── initial box ───────────────────────────────────────────────────────────
     a0, b0 = 1, min(core.n, core.vh)
@@ -1309,21 +1468,9 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
 
     _orig_sigint = signal.getsignal(signal.SIGINT)
 
-    def stop_current() -> None:
-        # User-initiated stop: silence the passive watcher so it doesn't
-        # fire a spurious ("next",) event on the mpv exit we're about to cause.
-        core.disarm_watcher()
-        _mpv_quit()
-        # Send SIGKILL to both first, then wait — avoids serial blocking
-        if core.mpv_proc and core.mpv_proc.poll() is None:
-            core.mpv_proc.kill()
-        if core.ytdlp_proc and core.ytdlp_proc.poll() is None:
-            core.ytdlp_proc.kill()
-        if core.mpv_proc:
-            core.mpv_proc.wait()
-        if core.ytdlp_proc:
-            core.ytdlp_proc.wait()
-        core.mpv_proc = core.ytdlp_proc = None
+    # stop_current() now lives on core (core.stop_current); local alias
+    # kept only so existing closure call-sites read naturally.
+    stop_current = core.stop_current
 
     def _sigint_handler(signum, frame):
         key_reader.stop(); stop_current(); _restore_terminal()
@@ -1344,11 +1491,7 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
         sys.stdout.flush()
 
     def _jump_to(target: int) -> None:
-        stop_current()
-        old = core.current_idx
-        core.current_idx = core.cursor_idx = target
-        core.paused = False
-        core.lyric["line"] = None; core.lyric["off"] = 0; core.lyric["idx"] = None; core.lyric["pos"] = None; core.lyric["mood"] = "calm"; core.lyric["anim_t"] = 0
+        old = core.jump_to(target)
         if _scroll_to(target):
             _redraw_viewport()
             _update_header()
@@ -1473,7 +1616,7 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                     break
 
             if _load_key == "q":
-                stop_current(); sys.stdout.write(_NL); return
+                core.request_quit(); sys.stdout.write(_NL); return
 
             if _load_key in ("[", "]"):
                 if len(core.playlists) == 1:
@@ -1484,8 +1627,7 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                         _pl.save(core.playlist_name, core.tracks, core.prompt)
                     except Exception:
                         pass
-                    stop_current()
-                    core.switch_tab = -1 if _load_key == "[" else 1
+                    core.request_switch_tab(-1 if _load_key == "[" else 1)
                 continue
 
             if _load_skip or core.mpv_proc.poll() is not None:
@@ -1580,55 +1722,31 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
 
                 key = key_reader.consume()
                 if key == "q":
-                    stop_current(); sys.stdout.write(_NL); return
+                    core.request_quit(); sys.stdout.write(_NL); return
 
                 elif key == "p":
-                    core.paused = not core.paused; _mpv_pause(core.paused)
-                    state = "Paused " if core.paused else "Playing"
+                    new_paused = core.toggle_pause()
+                    state = "Paused " if new_paused else "Playing"
                     _status(f"{_cache_mark}{state}  [{core.current_idx + 1}/{len(core.tracks)}]  {label}")
-                    if not core.paused:
-                        # Force immediate re-sync of lyric line/idx and reset marquee
-                        core.last_pos_ts = 0.0
-                        core.lyric["off"] = 0
-                        core.prev_lrc_line = None
+                    if not new_paused:
                         _tick_lyric()
                     else:
-                        _draw_track(core.current_idx, True, core.paused, core.cursor_idx == core.current_idx)
+                        _draw_track(core.current_idx, True, new_paused, core.cursor_idx == core.current_idx)
                     sys.stdout.flush()
 
                 elif key in (",", ".", "<", ">"):
                     delta = {",": -5.0, ".": +5.0, "<": -30.0, ">": +30.0}[key]
-                    duration = float(core.tracks[core.current_idx].duration_seconds or 0)
-                    cur_pos = core.lyric.get("pos")
-                    if cur_pos is None:
-                        cur_pos = _get_mpv_pos()
-                    # Clamp: never below 0; never past (duration - 1) to avoid auto-advance
-                    if cur_pos is not None:
-                        new_pos = cur_pos + delta
-                        if new_pos < 0:
-                            new_pos = 0.0
-                        if duration > 0 and new_pos > max(0.0, duration - 1.0):
-                            new_pos = max(0.0, duration - 1.0)
-                        _mpv_seek_absolute(new_pos)
-                    else:
-                        # Unknown current position: fall back to relative; mpv will clamp at 0.
-                        _mpv_seek(delta)
-                    # Build status hint
+                    new_pos_q, duration = core.seek_relative(delta)
                     arrow = "⏩" if delta > 0 else "⏪"
                     sign = "+" if delta > 0 else ""
-                    new_pos_q = _get_mpv_pos()
                     if new_pos_q is not None:
-                        core.lyric["pos"] = new_pos_q
-                        if duration > 0:
+                        if duration and duration > 0:
                             hint = f"{arrow} {sign}{int(delta)}s → {_fmt_dur(int(new_pos_q))} / {_fmt_dur(int(duration))}"
                         else:
                             hint = f"{arrow} {sign}{int(delta)}s → {_fmt_dur(int(new_pos_q))}"
                     else:
                         hint = f"{arrow} {sign}{int(delta)}s"
                     _status(hint)
-                    # Immediate lyric resync + redraw (reuse the poll-tick path)
-                    core.last_pos_ts = 0.0
-                    core.prev_lrc_line = None
                     _tick_lyric()
 
                 elif key == "l":
@@ -1649,37 +1767,24 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                         _status(f"{_cache_mark}Playing  [{core.current_idx + 1}/{len(core.tracks)}]  {label}")
 
                 elif key == "+":
-                    if core.appending:
+                    if not core.begin_append():
                         _status("Already fetching…")
                     else:
-                        core.appending = True
                         _status("Fetching more…")
                         threading.Thread(target=_do_append, daemon=True).start()
 
                 elif key == "d":
-                    del_idx = core.cursor_idx
-                    if len(core.tracks) == 1:
-                        stop_current()
+                    del_idx, deleted_playing, empty_now = core.delete_cursor()
+                    if empty_now:
+                        core.stop_current()
                         sys.stdout.write(_NL)
                         print("Playlist is now empty.")
                         return
-                    deleted_playing = (del_idx == core.current_idx)
-                    core.tracks.pop(del_idx)
-                    # Fix up indices: any index > del_idx decrements by 1
-                    if core.current_idx > del_idx:
-                        core.current_idx -= 1
-                    new_cursor = core.cursor_idx - 1 if core.cursor_idx > del_idx else core.cursor_idx
-                    core.cursor_idx = min(new_cursor, len(core.tracks) - 1)
                     if deleted_playing:
-                        stop_current()
-                        core.current_idx = min(del_idx, len(core.tracks) - 1)
-                        core.cursor_idx = core.current_idx
-                        core.paused = False
                         break
-                    else:
-                        _scroll_to(core.cursor_idx)
-                        _redraw_viewport(); _update_header()
-                        _status(f"Deleted  [{len(core.tracks)} tracks remain]")
+                    _scroll_to(core.cursor_idx)
+                    _redraw_viewport(); _update_header()
+                    _status(f"Deleted  [{len(core.tracks)} tracks remain]")
 
                 elif key == "s":
                     try:
@@ -1745,8 +1850,7 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                     _lrc_thread2.start()
 
                 elif key == "r":
-                    modes = ["seq", "repeat", "shuffle"]
-                    core.play_mode = modes[(modes.index(core.play_mode) + 1) % 3]
+                    core.cycle_mode()
                     mode_names = {"seq": "Sequential →→", "repeat": "Repeat one ↺", "shuffle": "Shuffle ⇄"}
                     if core.lyric_panel_on and core.panel_widths:
                         _, plw, lw = core.panel_widths
@@ -1764,14 +1868,12 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                             _pl.save(core.playlist_name, core.tracks, core.prompt)
                         except Exception:
                             pass
-                        stop_current()
-                        core.switch_tab = -1 if key == "[" else 1
+                        core.request_switch_tab(-1 if key == "[" else 1)
                         break
 
                 elif key == "n":
-                    stop_current(); old = core.current_idx; core.current_idx += 1; core.paused = False
-                    if core.current_idx < len(core.tracks):
-                        core.cursor_idx = core.current_idx
+                    old = core.next_track()
+                    if old is not None:
                         if _scroll_to(core.current_idx):
                             _redraw_viewport(); _update_header()
                         else:
@@ -1782,9 +1884,9 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                     break
 
                 elif key == "UP":
-                    new_cur = max(0, core.cursor_idx - 1)
-                    if new_cur != core.cursor_idx:
-                        old_cur = core.cursor_idx; core.cursor_idx = new_cur
+                    old_cur = core.select(core.cursor_idx - 1)
+                    new_cur = core.cursor_idx
+                    if new_cur != old_cur:
                         if _scroll_to(new_cur):
                             _redraw_viewport(); _update_header()
                         else:
@@ -1796,9 +1898,9 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                         _status(f"Select   [{new_cur + 1}/{len(core.tracks)}]  {_make_label(core.tracks[new_cur], 55)}")
 
                 elif key == "DOWN":
-                    new_cur = min(len(core.tracks) - 1, core.cursor_idx + 1)
-                    if new_cur != core.cursor_idx:
-                        old_cur = core.cursor_idx; core.cursor_idx = new_cur
+                    old_cur = core.select(core.cursor_idx + 1)
+                    new_cur = core.cursor_idx
+                    if new_cur != old_cur:
                         if _scroll_to(new_cur):
                             _redraw_viewport(); _update_header()
                         else:
@@ -1813,7 +1915,7 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                     new_vs = min(len(core.tracks) - core.vh, core.view_start + core.vh)
                     new_cur = min(len(core.tracks) - 1, new_vs)
                     if new_vs != core.view_start:
-                        core.cursor_idx = new_cur
+                        core.select(new_cur)
                         core.view_start = new_vs
                         _redraw_viewport(); _update_header()
                         _status(f"Select   [{new_cur + 1}/{len(core.tracks)}]  {_make_label(core.tracks[new_cur], 55)}")
@@ -1822,7 +1924,7 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                     new_vs = max(0, core.view_start - core.vh)
                     new_cur = new_vs
                     if new_vs != core.view_start:
-                        core.cursor_idx = new_cur
+                        core.select(new_cur)
                         core.view_start = new_vs
                         _redraw_viewport(); _update_header()
                         _status(f"Select   [{new_cur + 1}/{len(core.tracks)}]  {_make_label(core.tracks[new_cur], 55)}")
