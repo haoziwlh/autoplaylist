@@ -1258,6 +1258,7 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
             cursor_idx = current_idx
             _status(f"Loading  {label}")
             ytdlp_proc, mpv_proc = _launch_mpv(tracks[current_idx].youtube_url, debug=debug)
+            _cache_mark = "⚡ " if ytdlp_proc is None else ""
 
             # Fetch lyrics candidates in background while track loads
             from autoplaylist import lyrics as _lyr
@@ -1338,7 +1339,7 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                     _update_lyric_header()
                 continue
 
-            _status(f"Playing  [{current_idx + 1}/{len(tracks)}]  {label}")
+            _status(f"{_cache_mark}Playing  [{current_idx + 1}/{len(tracks)}]  {label}")
 
             # reset lyric state for new track
             _lyric["line"] = None
@@ -1401,7 +1402,7 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                     target = int(num_buf) - 1; num_buf = ""
                     if 0 <= target < len(tracks) and target != current_idx:
                         _jump_to(target); break
-                    _status(f"Playing  [{current_idx + 1}/{len(tracks)}]  {label}")
+                    _status(f"{_cache_mark}Playing  [{current_idx + 1}/{len(tracks)}]  {label}")
 
                 key = key_reader.consume()
                 if key == "q":
@@ -1410,7 +1411,7 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                 elif key == "p":
                     paused = not paused; _mpv_pause(paused)
                     state = "Paused " if paused else "Playing"
-                    _status(f"{state}  [{current_idx + 1}/{len(tracks)}]  {label}")
+                    _status(f"{_cache_mark}{state}  [{current_idx + 1}/{len(tracks)}]  {label}")
                     if not paused:
                         # Force immediate re-sync of lyric line/idx and reset marquee
                         _last_pos_ts = 0.0
@@ -1466,12 +1467,12 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                             _panel_widths = pw
                             _, plw, lw = pw
                             _full_repaint(True, plw, lw)
-                            _status(f"Playing  [{current_idx + 1}/{len(tracks)}]  {label}")
+                            _status(f"{_cache_mark}Playing  [{current_idx + 1}/{len(tracks)}]  {label}")
                     else:
                         lyric_panel_on = False
                         _panel_widths = None
                         _full_repaint(False, _IW_NORMAL, 0)
-                        _status(f"Playing  [{current_idx + 1}/{len(tracks)}]  {label}")
+                        _status(f"{_cache_mark}Playing  [{current_idx + 1}/{len(tracks)}]  {label}")
 
                 elif key == "+":
                     if _appending[0]:
@@ -1659,7 +1660,7 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                         target = cursor_idx
                     if 0 <= target < len(tracks) and target != current_idx:
                         _jump_to(target); break
-                    num_buf = ""; _status(f"Playing  [{current_idx + 1}/{len(tracks)}]  {label}")
+                    num_buf = ""; _status(f"{_cache_mark}Playing  [{current_idx + 1}/{len(tracks)}]  {label}")
 
                 elif key and key.isdigit():
                     num_buf = (num_buf + key) if num_buf and now - num_ts < 1.5 else key

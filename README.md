@@ -109,6 +109,8 @@ myplaylist new "chill beats" --count 30 --name my-chill-list
 |---|---|
 | `p` | Pause / resume |
 | `n` | Skip to next track |
+| `,` / `.` | Seek ±5 seconds (mpv-style) |
+| `<` / `>` | Seek ±30 seconds |
 | `↑ / ↓` | Move cursor up / down |
 | `← / →` | Page up / page down |
 | `Enter` | Jump to selected track |
@@ -210,7 +212,7 @@ source ~/.bashrc  # Linux / bash
     lyrics/            # Cached lyrics per track
 ```
 
-Audio and lyrics are cached on first play for faster subsequent loads and offline listening. Cache size is configurable:
+Audio and lyrics are cached on first play for faster subsequent loads and offline listening. When a cached track plays, the status line shows a `⚡` marker (e.g. `⚡ Playing [3/20] …`). Cache size is configurable:
 
 ```bash
 myplaylist config --cache-max-mb 1000   # increase to 1 GB
