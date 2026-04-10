@@ -16,12 +16,19 @@ Generate and play music playlists in your terminal from natural language prompts
 - **No account, no tracking** — everything stays local in `~/.myplaylist/`; no sign-up, no cloud sync, no data collection
 - **Zero extra subscription** — works with your existing Claude subscription, a free Groq/Qwen/DeepSeek API key, or a local Ollama instance; no music platform membership required
 - **Immersive terminal experience** — time-synced lyrics and mood-driven ASCII animations keep the vibe going while you work
+- **Background playback** — detach to a headless daemon with `b` or `--detach`; close the terminal and music keeps playing
+- **Remote control** — `myplaylist ctl next/pause/quit` from any terminal, or attach a full TUI with `myplaylist attach`
+- **Global hotkeys** — system-wide keyboard shortcuts via skhd (macOS); control playback from any app
 
 ## Features
 
 - **Natural language prompts**: `myplaylist new "下雨天的 lo-fi jazz"`
 - **Seed songs**: `myplaylist new --seed "Norah Jones - Come Away With Me"`
 - **Terminal playback** via mpv with a rich TUI (pause / skip / lyrics marquee / progress bar)
+- **Headless daemon mode**: `myplaylist play --detach` or press `b` during playback to background
+- **Attach TUI**: `myplaylist attach` connects to a running daemon with full keyboard controls
+- **Remote control**: `myplaylist ctl pause`, `myplaylist ctl next`, `myplaylist ctl quit`
+- **Global hotkeys**: `myplaylist hotkeys` sets up system-wide shortcuts (Ctrl+Alt+P/N/Q/R/A)
 - **Lyrics panel**: toggle a side panel showing time-synced lyrics with mood-driven ASCII animations
 - **In-session append**: press `+` to fetch ~10 more tracks without interrupting playback
 - **Playlist loops**: automatically restarts from track 1 after the last track
@@ -101,6 +108,16 @@ myplaylist new "chill beats" --count 30 --name my-chill-list
 | `myplaylist play [name]` | Play a playlist (defaults to most recent) |
 | `myplaylist export <name> --format m3u\|csv\|json` | Export playlist |
 | `myplaylist delete <name>` | Delete a playlist |
+| `myplaylist play --detach` | Start playback as a background daemon |
+| `myplaylist attach` | Attach TUI to a running daemon |
+| `myplaylist ctl status` | Show current playback status |
+| `myplaylist ctl pause` | Toggle pause / resume |
+| `myplaylist ctl next` | Skip to next track |
+| `myplaylist ctl mode [seq\|repeat\|shuffle]` | Cycle or set play mode |
+| `myplaylist ctl quit` | Stop the player daemon |
+| `myplaylist hotkeys` | Set up global keyboard shortcuts (macOS) |
+| `myplaylist hotkeys --show` | Show current hotkey bindings |
+| `myplaylist hotkeys --remove` | Remove hotkeys and stop skhd |
 | `myplaylist setup` | Choose LLM backend and configure API keys |
 
 ## Playback Controls
@@ -122,6 +139,7 @@ myplaylist new "chill beats" --count 30 --name my-chill-list
 | `[` / `]` | Switch to previous / next playlist |
 | `d` | Delete cursor track from live playlist |
 | `s` | Save current playlist to disk |
+| `b` | Detach to background daemon (music keeps playing) |
 | `q` | Quit |
 
 ## Lyrics Panel

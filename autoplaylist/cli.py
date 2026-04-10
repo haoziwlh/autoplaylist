@@ -70,6 +70,7 @@ def show(name: str = typer.Argument(..., help="Playlist name")) -> None:
 def play(
     name: Optional[str] = typer.Argument(None, help="Playlist name (default: most recent)"),
     debug: bool = typer.Option(False, "--debug", help="Log yt-dlp/mpv output to ~/.myplaylist/player.log"),
+    detach: bool = typer.Option(False, "--detach", "-d", help="Start playback as a background daemon"),
 ) -> None:
     """Play a saved playlist in the terminal.
 
@@ -77,6 +78,7 @@ def play(
     Controls during playback:
       p        pause / resume
       n        skip to next track
+      b        detach to background daemon
       ↑ ↓      move cursor
       ← →      previous / next page
       0-9      jump to track number + Enter
@@ -84,8 +86,12 @@ def play(
       [ ]      previous / next playlist
       q        quit
     """
-    from autoplaylist import _commands
-    _commands.cmd_play(name, debug=debug)
+    if detach:
+        from autoplaylist import _commands
+        _commands.cmd_play_detach(name, debug=debug)
+    else:
+        from autoplaylist import _commands
+        _commands.cmd_play(name, debug=debug)
 
 
 @app.command()
@@ -213,6 +219,100 @@ def uninstall(
     """Uninstall myplaylist and remove all data."""
     from autoplaylist import _commands
     _commands.cmd_uninstall(keep_data=keep_data)
+
+
+@app.command()
+def hotkeys(
+    show: bool = typer.Option(False, "--show", help="Show current key bindings and skhd status"),
+    remove: bool = typer.Option(False, "--remove", help="Remove hotkey config and stop skhd"),
+) -> None:
+    """Set up global keyboard shortcuts via skhd (macOS only).
+
+    \b
+    Default bindings:
+      Ctrl+Alt+P   pause / resume
+      Ctrl+Alt+N   next track
+      Ctrl+Alt+Q   quit daemon
+      Ctrl+Alt+R   cycle play mode
+      Ctrl+Alt+A   open attach TUI
+    """
+    from autoplaylist import hotkeys as hk
+    from rich.console import Console
+    c = Console()
+
+    if show:
+        bindings = hk.get_bindings()
+        running = hk.is_service_running()
+        c.print(f"\n[bold]skhd service:[/bold] {'[green]running[/green]' if running else '[red]not running[/red]'}")
+        c.print(f"[bold]Config:[/bold] {hk._SKHD_CONFIG}\n")
+        for action, hotkey in bindings.items():
+            label = hk._ACTION_COMMANDS.get(action, action)
+            c.print(f"  [cyan]{hotkey:20s}[/cyan]  →  {label}")
+        c.print()
+        return
+
+    if remove:
+        has_others = hk.remove_bindings()
+        if has_others:
+            hk.restart_service()
+            c.print("[green]✓ myplaylist hotkeys removed (skhd kept for other bindings)[/green]")
+        else:
+            hk.stop_service()
+            c.print("[green]✓ myplaylist hotkeys removed, skhd service stopped[/green]")
+        from autoplaylist import config as cfg
+        cfg.set_value("hotkeys", None)
+        return
+
+    # Default action: install + configure + start
+    hk.ensure_skhd()
+    bindings = hk.get_bindings()
+    hk.write_bindings(bindings)
+
+    # Start or restart the service
+    if hk.is_service_running():
+        hk.restart_service()
+    else:
+        hk.start_service()
+
+    c.print("[green]✓ Global hotkeys configured[/green]\n")
+    for action, hotkey in bindings.items():
+        label = hk._ACTION_COMMANDS.get(action, action)
+        c.print(f"  [cyan]{hotkey:20s}[/cyan]  →  {label}")
+
+    c.print(
+        "\n[bold yellow]⚠  Accessibility permission required[/bold yellow]\n"
+        "  skhd needs Accessibility access to capture global hotkeys.\n"
+        "  Open: [bold]System Settings → Privacy & Security → Accessibility[/bold]\n"
+        "  Add and enable [bold]skhd[/bold] in the list.\n"
+    )
+    # Offer to open System Settings directly
+    try:
+        import subprocess as _sp
+        _sp.run(
+            ["open", "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"],
+            check=False, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+        )
+        c.print("  [dim](System Settings opened)[/dim]\n")
+    except Exception:
+        pass
+
+
+@app.command()
+def attach() -> None:
+    """Attach a TUI to a running background player daemon.
+
+    \b
+    Keyboard controls work the same as normal play mode.
+    Press q or b to detach (daemon keeps playing).
+    """
+    from autoplaylist.daemon import is_daemon_alive
+    pid = is_daemon_alive()
+    if pid is None:
+        from rich.console import Console
+        Console().print("[red]No player daemon is running[/red]")
+        raise typer.Exit(code=1)
+    from autoplaylist.player import attach_tui
+    attach_tui()
 
 
 # ---------------------------------------------------------------------------

@@ -1246,6 +1246,8 @@ class CtlServer:
         self._sock: Optional[socket.socket] = None
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
+        self._subscribers: list[socket.socket] = []
+        self._sub_lock = threading.Lock()
 
     # ── lifecycle ────────────────────────────────────────────────────────
 
@@ -1270,6 +1272,14 @@ class CtlServer:
 
     def stop(self) -> None:
         self._stop.set()
+        # Close all subscriber connections
+        with self._sub_lock:
+            for s in self._subscribers:
+                try:
+                    s.close()
+                except OSError:
+                    pass
+            self._subscribers.clear()
         if self._sock:
             try:
                 self._sock.close()
@@ -1281,6 +1291,25 @@ class CtlServer:
             os.unlink(self._sock_path)
         except FileNotFoundError:
             pass
+
+    # ── subscriber management ───────────────────────────────────────────
+
+    def broadcast(self, event: dict) -> None:
+        """Send a JSON-line event to all subscribers. Remove dead ones."""
+        data = json.dumps(event).encode() + b"\n"
+        dead: list[socket.socket] = []
+        with self._sub_lock:
+            for s in self._subscribers:
+                try:
+                    s.sendall(data)
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    dead.append(s)
+            for s in dead:
+                self._subscribers.remove(s)
+                try:
+                    s.close()
+                except OSError:
+                    pass
 
     # ── accept loop ─────────────────────────────────────────────────────
 
@@ -1299,6 +1328,7 @@ class CtlServer:
     # ── client handler ──────────────────────────────────────────────────
 
     def _handle_client(self, conn: socket.socket) -> None:
+        is_subscribe = False
         try:
             conn.settimeout(2.0)
             data = b""
@@ -1314,15 +1344,23 @@ class CtlServer:
             except (json.JSONDecodeError, ValueError):
                 conn.sendall(json.dumps({"ok": False, "error": "invalid request"}).encode() + b"\n")
                 return
+
+            # Subscribe: keep connection open, don't close
+            if req.get("cmd") == "subscribe":
+                is_subscribe = True
+                self._handle_subscribe(conn)
+                return
+
             resp = self._dispatch(req)
             conn.sendall(json.dumps(resp).encode() + b"\n")
         except Exception:
             pass
         finally:
-            try:
-                conn.close()
-            except OSError:
-                pass
+            if not is_subscribe:
+                try:
+                    conn.close()
+                except OSError:
+                    pass
 
     # ── command dispatch ────────────────────────────────────────────────
 
@@ -1368,6 +1406,26 @@ class CtlServer:
             self._core._ui_q.put(("ctl_mode",))
             return {"ok": True, "mode": self._core.play_mode}
 
+        if cmd == "seek":
+            try:
+                delta = float(arg) if arg is not None else 5.0
+            except (ValueError, TypeError):
+                delta = 5.0
+            _mpv_seek(delta)
+            return {"ok": True}
+
+        if cmd == "play_track":
+            try:
+                idx = int(arg) if arg is not None else -1
+            except (ValueError, TypeError):
+                idx = -1
+            if 0 <= idx < len(self._core.tracks):
+                self._core.current_idx = idx
+                self._core.cursor_idx = idx
+                self._core._ui_q.put(("ctl_next",))
+                return {"ok": True, "idx": idx}
+            return {"ok": False, "error": f"invalid track index: {arg}"}
+
         if cmd == "quit":
             self._core.request_quit()
             self._core._ui_q.put(("ctl_quit",))
@@ -1375,9 +1433,737 @@ class CtlServer:
 
         return {"ok": False, "error": f"unknown command: {cmd}"}
 
+    # ── subscribe handler ───────────────────────────────────────────────
+
+    def _handle_subscribe(self, conn: socket.socket) -> None:
+        """Send initial snapshot, then add to subscriber list.
+
+        The connection stays open — events are pushed via broadcast().
+        """
+        conn.settimeout(None)  # no timeout for long-lived connection
+        # Build snapshot payload
+        snap = self._core.snapshot()
+        tracks_data = []
+        for t in self._core.tracks:
+            tracks_data.append({
+                "title": t.title,
+                "artist": t.artist,
+                "duration": t.duration_seconds,
+                "url": t.youtube_url,
+            })
+        # Active LRC lines
+        active_lrc = []
+        if self._core.lrc_candidates and self._core.lrc_idx < len(self._core.lrc_candidates):
+            active_lrc = [
+                {"ts": ts, "text": text}
+                for ts, text in self._core.lrc_candidates[self._core.lrc_idx]
+            ]
+        snapshot = {
+            "event": "snapshot",
+            "data": {
+                "playlist_name": snap.playlist_name,
+                "tracks": tracks_data,
+                "current_idx": snap.current_idx,
+                "cursor_idx": snap.cursor_idx,
+                "paused": snap.paused,
+                "mode": snap.play_mode,
+                "lyric_line": snap.lyric_line,
+                "lyric_idx": snap.lyric_idx,
+                "lyric_pos": snap.lyric_pos,
+                "lyric_mood": snap.lyric_mood,
+                "active_lrc": active_lrc,
+            },
+        }
+        try:
+            conn.sendall(json.dumps(snapshot).encode() + b"\n")
+        except (BrokenPipeError, OSError):
+            try:
+                conn.close()
+            except OSError:
+                pass
+            return
+        with self._sub_lock:
+            self._subscribers.append(conn)
+
+
+class _AdoptedProcess:
+    """Wrap an OS PID for a process we inherited via fork (not spawned).
+
+    Provides the subset of subprocess.Popen API that PlayerCore / watcher use.
+    We can't waitpid() on non-child processes, so poll() uses kill(pid, 0).
+    """
+
+    def __init__(self, pid: int):
+        self.pid = pid
+        self._returncode: int | None = None
+
+    def poll(self) -> int | None:
+        if self._returncode is not None:
+            return self._returncode
+        try:
+            os.kill(self.pid, 0)
+            return None          # still running
+        except ProcessLookupError:
+            self._returncode = 0
+            return 0             # exited
+        except PermissionError:
+            return None          # alive (different user edge case)
+
+    def kill(self) -> None:
+        try:
+            os.kill(self.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    def wait(self, timeout: float | None = None) -> int:
+        import time as _time
+        deadline = _time.time() + (timeout or 30)
+        while _time.time() < deadline:
+            if self.poll() is not None:
+                return self._returncode  # type: ignore[return-value]
+            _time.sleep(0.1)
+        return 0
+
 
 # ---------------------------------------------------------------------------
-# Main player
+# Headless playback (daemon mode)
+# ---------------------------------------------------------------------------
+
+def play_headless(playlists: list[dict], active_idx: int = 0, debug: bool = False,
+                   resume_track: int | None = None,
+                   resume_mode: str | None = None,
+                   adopt_mpv_pid: int | None = None,
+                   adopt_ytdlp_pid: int | None = None) -> None:
+    """Run playback without any terminal UI — for daemon mode.
+
+    Drives PlayerCore + mpv + CtlServer. Emits events to subscribers.
+    *resume_track*: if set, start from this track index instead of 0.
+    *resume_mode*: if set, restore this play mode (seq/repeat/shuffle).
+    *adopt_mpv_pid/adopt_ytdlp_pid*: adopt a running mpv/ytdlp instead of
+        re-launching. The daemon inherits the process after fork.
+    """
+    if not playlists:
+        return
+
+    core = PlayerCore(playlists=playlists, active_idx=active_idx, debug=debug)
+    core.playlist_name = playlists[active_idx]["name"]
+    core.tracks = list(playlists[active_idx]["tracks"])
+    core.prompt = playlists[active_idx]["prompt"]
+
+    if not core.tracks:
+        return
+
+    core.n = len(core.tracks)
+    core.vh = min(10, core.n)
+    print(f"[headless] start: resume_track={resume_track} resume_mode={resume_mode} adopt_mpv={adopt_mpv_pid}", flush=True)
+    if resume_track is not None and 0 <= resume_track < core.n:
+        core.current_idx = resume_track
+        core.cursor_idx = resume_track
+    if resume_mode and resume_mode in ("seq", "repeat", "shuffle"):
+        core.play_mode = resume_mode
+
+    ctl_server = CtlServer(core)
+    ctl_server.start()
+    core.start()
+
+    from autoplaylist import lyrics as _lyr
+    from autoplaylist import cache as _cache
+    from autoplaylist import llm as _llm_mod
+
+    def _fetch_lyrics(artist: str, title: str) -> None:
+        candidates = _cache.get_lyrics(artist, title)
+        if candidates is None:
+            candidates = _lyr.fetch_candidates(artist, title)
+            if candidates:
+                _cache.save_lyrics(artist, title, candidates)
+        core.lrc_candidates = list(candidates or [])
+        core.lrc_ready = True
+
+    def _active_lrc() -> list[tuple[float, str]]:
+        if core.lrc_candidates and core.lrc_idx < len(core.lrc_candidates):
+            return core.lrc_candidates[core.lrc_idx]
+        return []
+
+    _adopting = adopt_mpv_pid is not None
+
+    try:
+        while True:
+            if core.current_idx >= len(core.tracks):
+                # Sequential mode finished
+                break
+
+            _t = core.tracks[core.current_idx]
+
+            _adopted_this = False
+            if _adopting:
+                # First iteration: adopt the already-running mpv from the TUI
+                core.mpv_proc = _AdoptedProcess(adopt_mpv_pid)
+                core.ytdlp_proc = _AdoptedProcess(adopt_ytdlp_pid) if adopt_ytdlp_pid else None
+                _adopting = False
+                _adopted_this = True
+                print(f"[headless] adopted mpv pid={adopt_mpv_pid}", flush=True)
+            else:
+                # Launch mpv
+                core.ytdlp_proc, core.mpv_proc = _launch_mpv(_t.youtube_url, debug=debug)
+
+            # Drain stale events, arm watcher
+            while True:
+                try:
+                    core._ui_q.get_nowait()
+                except queue.Empty:
+                    break
+            core.arm_watcher()
+
+            # Fetch lyrics in background
+            core.lrc_candidates = []
+            core.lrc_idx = 0
+            core.lrc_ready = False
+            threading.Thread(target=_fetch_lyrics, args=(_t.artist, _t.title), daemon=True).start()
+
+            # Classify mood in background
+            def _classify_mood_bg(artist: str, title: str) -> None:
+                core.lyric["mood"] = _llm_mod.classify_mood(artist, title)
+            threading.Thread(target=_classify_mood_bg, args=(_t.artist, _t.title), daemon=True).start()
+
+            # Broadcast track_started event
+            ctl_server.broadcast({
+                "event": "track_started",
+                "data": {
+                    "idx": core.current_idx,
+                    "artist": _t.artist,
+                    "title": _t.title,
+                    "duration": _t.duration_seconds,
+                },
+            })
+
+            if not _adopted_this:
+                # Wait for mpv to start (up to 3s)
+                _load_start = time.time()
+                while time.time() - _load_start < 3.0:
+                    time.sleep(0.1)
+                    if core.mpv_proc.poll() is not None:
+                        break
+
+                if core.mpv_proc.poll() is not None:
+                    # Track failed to load — skip
+                    if not core._watch_active:
+                        try:
+                            core._ui_q.get_nowait()
+                        except queue.Empty:
+                            pass
+                        continue
+                    core.disarm_watcher()
+                    old = core.current_idx
+                    core.current_idx += 1
+                    continue
+
+            # Track is playing — poll until it ends or command received
+            last_pos_ts = 0.0
+            while True:
+                time.sleep(0.2)
+                now = time.time()
+
+                # Update position + lyrics every ~1s, broadcast to subscribers
+                if now - last_pos_ts >= 1.0:
+                    last_pos_ts = now
+                    pos = _get_mpv_pos()
+                    if pos is not None:
+                        core.lyric["pos"] = pos
+                        _lrc = _active_lrc()
+                        line = None
+                        lyric_idx = None
+                        if core.lrc_ready and _lrc:
+                            line = _lyr.current_line(_lrc, pos)
+                            core.lyric["line"] = line
+                            for j in range(len(_lrc) - 1, -1, -1):
+                                if pos >= _lrc[j][0]:
+                                    lyric_idx = j
+                                    core.lyric["idx"] = j
+                                    break
+                        ctl_server.broadcast({
+                            "event": "position",
+                            "data": {
+                                "pos": pos,
+                                "line": line,
+                                "idx": lyric_idx,
+                                "mood": core.lyric.get("mood", "calm"),
+                            },
+                        })
+
+                # Check for events from core (natural track end)
+                try:
+                    ev = core._ui_q.get_nowait()
+                except queue.Empty:
+                    ev = None
+
+                if ev is not None:
+                    tag = ev[0] if isinstance(ev, tuple) else ev
+                    if tag == "repeat":
+                        break
+                    if tag == "next":
+                        if core.current_idx < len(core.tracks):
+                            ctl_server.broadcast({
+                                "event": "track_started",
+                                "data": {
+                                    "idx": core.current_idx,
+                                    "artist": core.tracks[core.current_idx].artist,
+                                    "title": core.tracks[core.current_idx].title,
+                                    "duration": core.tracks[core.current_idx].duration_seconds,
+                                },
+                            })
+                        break
+                    if tag == "ctl_quit":
+                        ctl_server.broadcast({"event": "stopped"})
+                        return
+                    if tag == "ctl_next":
+                        if core.current_idx < len(core.tracks):
+                            core.cursor_idx = core.current_idx
+                        break
+                    if tag == "ctl_pause":
+                        ctl_server.broadcast({
+                            "event": "paused",
+                            "data": {"paused": core.paused},
+                        })
+                    if tag == "ctl_mode":
+                        ctl_server.broadcast({
+                            "event": "mode_changed",
+                            "data": {"mode": core.play_mode},
+                        })
+
+        # Playlist finished
+        ctl_server.broadcast({"event": "stopped"})
+
+    finally:
+        core.stop_current()
+        ctl_server.stop()
+        core.shutdown()
+        # Remove PID file if we're the daemon
+        from autoplaylist.daemon import remove_pid
+        remove_pid()
+
+
+# ---------------------------------------------------------------------------
+# TUI Attach Client
+# ---------------------------------------------------------------------------
+
+def attach_tui() -> None:
+    """Connect to a running daemon and render a full TUI from subscribe events.
+
+    Keys are forwarded as ctl commands. q/b detach without stopping the daemon.
+    """
+    # Connect and subscribe
+    sub_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sub_sock.connect(_CTL_SOCK)
+    except (FileNotFoundError, ConnectionRefusedError, OSError):
+        print("No player daemon is running")
+        return
+    sub_sock.sendall(json.dumps({"cmd": "subscribe"}).encode() + b"\n")
+    sub_sock.settimeout(5.0)
+
+    # Read initial snapshot
+    buf = b""
+    while b"\n" not in buf:
+        chunk = sub_sock.recv(4096)
+        if not chunk:
+            print("Connection closed")
+            return
+        buf += chunk
+    line, buf = buf.split(b"\n", 1)
+    snapshot = json.loads(line)
+    if snapshot.get("event") != "snapshot":
+        print("Unexpected response from daemon")
+        return
+
+    data = snapshot["data"]
+    tracks_raw = data["tracks"]
+
+    # Build Track objects for rendering
+    tracks = []
+    for td in tracks_raw:
+        tracks.append(Track(
+            title=td["title"],
+            artist=td["artist"],
+            youtube_url=td.get("url", ""),
+            duration_seconds=td.get("duration", 0),
+        ))
+
+    # Build a minimal core-like state object for rendering
+    playlists = [{"name": data["playlist_name"], "tracks": tracks, "prompt": ""}]
+    core = PlayerCore(playlists=playlists, active_idx=0, debug=False)
+    core.playlist_name = data["playlist_name"]
+    core.tracks = tracks
+    core.n = len(tracks)
+    core.vh = min(_VIEW_H, core.n)
+    core.current_idx = data.get("current_idx", 0)
+    core.cursor_idx = data.get("cursor_idx", core.current_idx)
+    core.paused = data.get("paused", False)
+    core.play_mode = data.get("mode", "seq")
+    core.lyric["line"] = data.get("lyric_line")
+    core.lyric["idx"] = data.get("lyric_idx")
+    core.lyric["pos"] = data.get("lyric_pos")
+    core.lyric["mood"] = data.get("lyric_mood", "calm")
+
+    # Parse active LRC if provided
+    if data.get("active_lrc"):
+        core.lrc_candidates = [[(e["ts"], e["text"]) for e in data["active_lrc"]]]
+        core.lrc_ready = True
+
+    if not core.tracks:
+        print("Playlist is empty")
+        return
+
+    # ── Setup terminal ────────────────────────────────────────────────────
+    global _IW, _LABEL_W, _TOP, _MID, _BOT
+    try:
+        term_cols = os.get_terminal_size().columns
+    except OSError:
+        term_cols = 80
+    _IW = min(_IW_NORMAL, max(60, term_cols - 2))
+    _LABEL_W = _IW - 20
+    _TOP = "┌" + "─" * _IW + "┐"
+    _MID = "├" + "─" * _IW + "┤"
+    _BOT = "└" + "─" * _IW + "┘"
+    sys.stdout.write("\033[?7l")
+    sys.stdout.flush()
+
+    # ── viewport helpers (same as play_playlist) ─────────────────────────
+    def _lines_up(rel: int) -> int:
+        return 3 + core.vh - rel
+
+    def _row_for(idx: int) -> int | None:
+        rel = idx - core.view_start
+        return rel if 0 <= rel < core.vh else None
+
+    def _draw_track_a(idx: int, playing: bool, is_paused: bool, cursored: bool) -> None:
+        rel = _row_for(idx)
+        if rel is None:
+            return
+        ll = core.lyric["line"] if playing else None
+        lo = core.lyric["off"] if playing else 0
+        vis = _track_inner_vis(idx, playing, cursored, core.tracks, ll, lo, False)
+        disp = _track_inner_disp(idx, playing, is_paused, cursored, core.tracks, ll, lo, False)
+        row = _box_row(vis, disp)
+        lu = _lines_up(rel)
+        sys.stdout.write(f"\033[{lu}A\r{row}\033[{lu}B\r")
+
+    def _redraw_viewport_a() -> None:
+        for vi in range(core.vh):
+            idx = core.view_start + vi
+            if idx >= len(core.tracks):
+                break
+            playing = idx == core.current_idx
+            cursored = idx == core.cursor_idx
+            _draw_track_a(idx, playing, core.paused and playing, cursored)
+        sys.stdout.flush()
+
+    def _scroll_to_a(target: int) -> bool:
+        if core.n <= core.vh:
+            return False
+        new_vs = max(0, min(target, core.n - core.vh))
+        if new_vs == core.view_start:
+            return False
+        core.view_start = new_vs
+        return True
+
+    def _update_header_a() -> None:
+        a0 = core.view_start + 1
+        b0 = min(core.view_start + core.vh, core.n)
+        page_info = f"{a0}-{b0}/{core.n}" if core.n > core.vh else f"{core.n} tracks"
+        lft = "  ♫ myplaylist  "
+        rgt_vis = f"  {core.playlist_name} ({page_info})  "
+        rgt_disp = f"  {_YL}{core.playlist_name}{_R} ({page_info})  "
+        hpad = max(0, _IW - len(lft) - _cjk_width(rgt_vis))
+        hdr_vis = f"{lft}{' ' * hpad}{rgt_vis}"
+        hdr_disp = f"  {_B}{_CY}♫ myplaylist{_R}  " + " " * hpad + rgt_disp
+        lu = 5 + core.vh
+        sys.stdout.write(f"\033[{lu}A\r{_box_row(hdr_vis, hdr_disp)}\033[{lu}B\r")
+        sys.stdout.flush()
+
+    # ── Full repaint helper ────────────────────────────────────────────────
+    def _full_repaint_a() -> None:
+        """Erase old box and redraw everything."""
+        NL = "\033[K\r\n"
+        sys.stdout.write(f"\033[{core.vh + 7}A\r\033[J")
+        a0 = core.view_start + 1
+        b0 = min(core.view_start + core.vh, core.n)
+        page_info = f"{a0}-{b0}/{core.n}" if core.n > core.vh else f"{core.n} tracks"
+        lft_ = "  ♫ myplaylist  "
+        rgt_vis_ = f"  {core.playlist_name} ({page_info})  "
+        rgt_disp_ = f"  {_YL}{core.playlist_name}{_R} ({page_info})  "
+        hpad_ = max(0, _IW - len(lft_) - _cjk_width(rgt_vis_))
+        hdr_vis_ = f"{lft_}{' ' * hpad_}{rgt_vis_}"
+        hdr_disp_ = f"  {_B}{_CY}♫ myplaylist{_R}  " + " " * hpad_ + rgt_disp_
+        ctrl_vis_, ctrl_disp_ = _ctrl_bar(_IW, False, core.play_mode)
+        ctrl_pad_ = max(0, _IW - _cjk_width(ctrl_vis_))
+        ls = [NL, _TOP + NL, _box_row(hdr_vis_, hdr_disp_) + NL, _MID + NL]
+        for vi in range(core.vh):
+            idx = core.view_start + vi
+            if idx >= len(core.tracks):
+                break
+            playing = idx == core.current_idx
+            cursored = idx == core.cursor_idx
+            vis_ = _track_inner_vis(idx, playing, cursored, core.tracks)
+            disp_ = _track_inner_disp(idx, playing, core.paused and playing, cursored, core.tracks)
+            ls.append(_box_row(vis_, disp_) + NL)
+        ls += [_MID + NL, f"│{ctrl_disp_}{' ' * ctrl_pad_}│" + NL, _BOT + NL]
+        _w("".join(ls))
+
+    # ── Initial draw ─────────────────────────────────────────────────────
+    a0, b0 = 1, min(core.n, core.vh)
+    page_info0 = f"{a0}-{b0}/{core.n}" if core.n > core.vh else f"{core.n} tracks"
+    lft = "  ♫ myplaylist  "
+    rgt_vis0 = f"  {core.playlist_name} ({page_info0})  "
+    rgt_disp0 = f"  {_YL}{core.playlist_name}{_R} ({page_info0})  "
+    hpad0 = max(0, _IW - len(lft) - _cjk_width(rgt_vis0))
+    hdr_vis0 = f"{lft}{' ' * hpad0}{rgt_vis0}"
+    hdr_disp0 = f"  {_B}{_CY}♫ myplaylist{_R}  " + " " * hpad0 + rgt_disp0
+
+    ctrl_vis, ctrl_disp = _ctrl_bar(_IW, False, core.play_mode)
+    ctrl_pad = max(0, _IW - _cjk_width(ctrl_vis))
+
+    lines = [_NL, _TOP + _NL, _box_row(hdr_vis0, hdr_disp0) + _NL, _MID + _NL]
+    for i in range(core.vh):
+        idx = core.view_start + i
+        playing = idx == core.current_idx
+        cursored = idx == core.cursor_idx
+        vis = _track_inner_vis(idx, playing, cursored, core.tracks)
+        disp = _track_inner_disp(idx, playing, core.paused and playing, cursored, core.tracks)
+        lines.append(_box_row(vis, disp) + _NL)
+    lines += [_MID + _NL, f"│{ctrl_disp}{' ' * ctrl_pad}│" + _NL, _BOT + _NL]
+    _w("".join(lines))
+
+    label = _make_label(core.tracks[core.current_idx], 55) if core.current_idx < len(core.tracks) else ""
+    state = "Paused " if core.paused else "Playing"
+    sys.stdout.write(f"\r{_D}♪{_R}  {state}  [{core.current_idx + 1}/{core.n}]  {label}")
+    sys.stdout.flush()
+
+    # ── Event + key loop ─────────────────────────────────────────────────
+    key_reader = _KeyReader()
+    key_reader.start()
+
+    _orig_sigint = signal.getsignal(signal.SIGINT)
+    def _sigint_handler(signum, frame):
+        key_reader.stop()
+        _restore_terminal()
+        signal.signal(signal.SIGINT, _orig_sigint)
+        sys.stdout.write(_NL)
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGINT, _sigint_handler)
+
+    sub_sock.settimeout(0.05)  # non-blocking-ish for event polling
+
+    def _ctl_cmd(cmd: str, arg: str | None = None) -> None:
+        """Send a one-shot ctl command to the daemon (separate connection)."""
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(2.0)
+            s.connect(_CTL_SOCK)
+            req: dict = {"cmd": cmd}
+            if arg is not None:
+                req["arg"] = arg
+            s.sendall(json.dumps(req).encode() + b"\n")
+            s.recv(1024)
+            s.close()
+        except OSError:
+            pass
+
+    def _status_a(text: str) -> None:
+        avail = _IW - 3
+        tw = _cjk_width(text)
+        if tw > avail:
+            text = _truncate(text, avail)
+            tw = avail
+        sys.stdout.write(f"\r{_D}♪{_R}  {text}{' ' * (avail - tw)}")
+        sys.stdout.flush()
+
+    num_buf = ""
+    num_ts = 0.0
+
+    try:
+        while True:
+            time.sleep(0.05)
+
+            # Auto-clear digit buffer after timeout
+            if num_buf and time.time() - num_ts > 1.5:
+                target = int(num_buf) - 1
+                num_buf = ""
+                if 0 <= target < len(core.tracks) and target != core.current_idx:
+                    _ctl_cmd("play_track", str(target))
+
+            # Poll subscribe events
+            try:
+                while True:
+                    chunk = sub_sock.recv(4096)
+                    if not chunk:
+                        # Daemon closed connection
+                        _status_a("Daemon stopped")
+                        time.sleep(1)
+                        return
+                    buf += chunk
+                    while b"\n" in buf:
+                        line, buf = buf.split(b"\n", 1)
+                        if not line.strip():
+                            continue
+                        try:
+                            ev = json.loads(line)
+                        except (json.JSONDecodeError, ValueError):
+                            continue
+                        tag = ev.get("event", "")
+                        ed = ev.get("data", {})
+
+                        if tag == "track_started":
+                            core.current_idx = ed.get("idx", core.current_idx)
+                            core.cursor_idx = core.current_idx
+                            core.paused = False
+                            core.lyric["line"] = None
+                            core.lyric["off"] = 0
+                            core.lyric["idx"] = None
+                            core.lyric["pos"] = None
+                            if _scroll_to_a(core.current_idx):
+                                _redraw_viewport_a()
+                                _update_header_a()
+                            else:
+                                _redraw_viewport_a()
+                            label = _make_label(core.tracks[core.current_idx], 55) if core.current_idx < len(core.tracks) else ""
+                            _status_a(f"Playing  [{core.current_idx + 1}/{core.n}]  {label}")
+
+                        elif tag == "paused":
+                            core.paused = ed.get("paused", core.paused)
+                            state = "Paused " if core.paused else "Playing"
+                            label = _make_label(core.tracks[core.current_idx], 55) if core.current_idx < len(core.tracks) else ""
+                            _status_a(f"{state}  [{core.current_idx + 1}/{core.n}]  {label}")
+                            _draw_track_a(core.current_idx, True, core.paused, core.cursor_idx == core.current_idx)
+                            sys.stdout.flush()
+
+                        elif tag == "position":
+                            core.lyric["pos"] = ed.get("pos")
+                            core.lyric["line"] = ed.get("line")
+                            core.lyric["idx"] = ed.get("idx")
+                            core.lyric["mood"] = ed.get("mood", "calm")
+                            # Update marquee offset
+                            if core.lyric["line"]:
+                                pw = _cjk_width(core.lyric["line"]) + 4
+                                core.lyric["off"] = (core.lyric["off"] + 1) % max(1, pw)
+                            _draw_track_a(core.current_idx, True, core.paused, core.cursor_idx == core.current_idx)
+                            sys.stdout.flush()
+
+                        elif tag == "mode_changed":
+                            core.play_mode = ed.get("mode", core.play_mode)
+                            _full_repaint_a()
+                            _status_a(f"Mode: {core.play_mode}")
+
+                        elif tag == "stopped":
+                            _status_a("Daemon stopped")
+                            time.sleep(1)
+                            return
+            except socket.timeout:
+                pass
+            except OSError:
+                _status_a("Daemon connection lost")
+                time.sleep(1)
+                return
+
+            # Process key input
+            key = key_reader.consume()
+            if key is None:
+                continue
+
+            if key in ("q", "b"):
+                return
+
+            elif key == "p":
+                _ctl_cmd("pause")
+
+            elif key == "n":
+                _ctl_cmd("next")
+
+            elif key == "r":
+                _ctl_cmd("mode")
+
+            elif key == ",":
+                _ctl_cmd("seek", "-5")
+            elif key == ".":
+                _ctl_cmd("seek", "5")
+            elif key == "<":
+                _ctl_cmd("seek", "-30")
+            elif key == ">":
+                _ctl_cmd("seek", "30")
+
+            elif key == "UP":
+                old_cur = core.cursor_idx
+                core.cursor_idx = max(0, core.cursor_idx - 1)
+                if core.cursor_idx != old_cur:
+                    if _scroll_to_a(core.cursor_idx):
+                        _redraw_viewport_a()
+                        _update_header_a()
+                    else:
+                        _draw_track_a(old_cur, old_cur == core.current_idx,
+                                      core.paused and old_cur == core.current_idx, False)
+                        _draw_track_a(core.cursor_idx, core.cursor_idx == core.current_idx,
+                                      core.paused and core.cursor_idx == core.current_idx, True)
+                        sys.stdout.flush()
+
+            elif key == "DOWN":
+                old_cur = core.cursor_idx
+                core.cursor_idx = min(len(core.tracks) - 1, core.cursor_idx + 1)
+                if core.cursor_idx != old_cur:
+                    if _scroll_to_a(core.cursor_idx):
+                        _redraw_viewport_a()
+                        _update_header_a()
+                    else:
+                        _draw_track_a(old_cur, old_cur == core.current_idx,
+                                      core.paused and old_cur == core.current_idx, False)
+                        _draw_track_a(core.cursor_idx, core.cursor_idx == core.current_idx,
+                                      core.paused and core.cursor_idx == core.current_idx, True)
+
+            elif key == "LEFT":
+                new_vs = max(0, core.view_start - core.vh)
+                if new_vs != core.view_start:
+                    core.view_start = new_vs
+                    core.cursor_idx = core.view_start
+                    _redraw_viewport_a()
+                    _update_header_a()
+
+            elif key == "RIGHT":
+                max_vs = max(0, len(core.tracks) - core.vh)
+                new_vs = min(max_vs, core.view_start + core.vh)
+                if new_vs != core.view_start:
+                    core.view_start = new_vs
+                    core.cursor_idx = core.view_start
+                    _redraw_viewport_a()
+                    _update_header_a()
+
+            elif key in ("\r", "\n"):
+                if num_buf:
+                    target = int(num_buf) - 1
+                    num_buf = ""
+                else:
+                    target = core.cursor_idx
+                if 0 <= target < len(core.tracks) and target != core.current_idx:
+                    _ctl_cmd("play_track", str(target))
+                else:
+                    _status_a(f"Playing  [{core.current_idx + 1}/{core.n}]")
+
+            elif key and key.isdigit():
+                now_t = time.time()
+                num_buf = (num_buf + key) if num_buf and now_t - num_ts < 1.5 else key
+                num_ts = now_t
+                _status_a(f"Goto     [{num_buf}]  — add digits or Enter")
+
+    finally:
+        signal.signal(signal.SIGINT, _orig_sigint)
+        key_reader.stop()
+        try:
+            sub_sock.close()
+        except OSError:
+            pass
+        _restore_terminal()
+        sys.stdout.write(_NL)
+
+
+# ---------------------------------------------------------------------------
+# Main player (TUI)
 # ---------------------------------------------------------------------------
 
 def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = False) -> None:
@@ -1730,6 +2516,7 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
             sys.stdout.flush()
         _update_lyric_header()
 
+    detached = False
     try:
         while True:
             # ── tab switch ────────────────────────────────────────────────────
@@ -1952,6 +2739,36 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                 key = key_reader.consume()
                 if key == "q":
                     core.request_quit(); sys.stdout.write(_NL); return
+
+                elif key == "b":
+                    # Detach: fork playback into daemon, exit TUI
+                    from autoplaylist.daemon import is_daemon_alive, daemonize
+                    if is_daemon_alive():
+                        _status("Daemon already running")
+                    else:
+                        # Stop the TUI's ctl server so daemon can bind it
+                        ctl_server.stop()
+                        key_reader.stop()
+                        _restore_terminal()
+                        sys.stdout.write(_NL)
+                        # Grab mpv/ytdlp PIDs so daemon can adopt them
+                        _mpv_pid = core.mpv_proc.pid if core.mpv_proc else None
+                        _ytdlp_pid = core.ytdlp_proc.pid if core.ytdlp_proc else None
+                        core.disarm_watcher()
+                        # Mark detached — don't kill mpv or delete socket in finally
+                        detached = True
+                        # Fork: grandchild adopts running mpv, zero interruption
+                        from autoplaylist.player import play_headless
+                        pid = daemonize(
+                            play_headless,
+                            core.playlists, core.active_idx, core.debug,
+                            resume_track=core.current_idx,
+                            resume_mode=core.play_mode,
+                            adopt_mpv_pid=_mpv_pid,
+                            adopt_ytdlp_pid=_ytdlp_pid,
+                        )
+                        print(f"Detached to daemon (PID {pid})")
+                        return
 
                 elif key == "p":
                     new_paused = core.toggle_pause()
@@ -2222,8 +3039,10 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
     finally:
         signal.signal(signal.SIGINT, _orig_sigint)
         key_reader.stop()
-        stop_current()
-        ctl_server.stop()
+        if not detached:
+            stop_current()
+            ctl_server.stop()
+        # detached: mpv already killed before fork; socket left for daemon
         core.shutdown()
         _restore_terminal()
         sys.stdout.write(_NL)

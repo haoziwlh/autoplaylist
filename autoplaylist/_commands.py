@@ -196,6 +196,50 @@ def cmd_play(name: Optional[str] = None, debug: bool = False) -> None:
     play_playlist(playlists, active_idx, debug=debug)
 
 
+def cmd_play_detach(name: Optional[str] = None, debug: bool = False) -> None:
+    from autoplaylist.daemon import is_daemon_alive, daemonize
+
+    pid = is_daemon_alive()
+    if pid is not None:
+        console.print(f"[yellow]Player daemon already running (PID {pid})[/yellow]")
+        raise SystemExit(1)
+
+    all_playlists = pl.list_all()
+    if not all_playlists:
+        console.print("[red]No playlists found. Run `myplaylist new` to create one.[/red]")
+        raise SystemExit(1)
+
+    if name is None:
+        active_idx = 0
+    else:
+        names = [p["name"] for p in all_playlists]
+        if name not in names:
+            console.print(f"[red]Playlist '{name}' not found.[/red]")
+            console.print(f"Available: {', '.join(names)}")
+            raise SystemExit(1)
+        active_idx = names.index(name)
+
+    playlists = []
+    for p in all_playlists:
+        try:
+            data = pl.load(p["name"])
+            playlists.append({
+                "name": p["name"],
+                "tracks": pl.tracks_from_data(data),
+                "prompt": data.get("prompt", ""),
+            })
+        except FileNotFoundError:
+            pass
+
+    if not playlists:
+        console.print("[red]No playlists found.[/red]")
+        raise SystemExit(1)
+
+    from autoplaylist.player import play_headless
+    daemon_pid = daemonize(play_headless, playlists, active_idx, debug)
+    console.print(f"[green]Daemon started (PID {daemon_pid})[/green]")
+
+
 def cmd_export(name: str, format: str, output: Optional[str]) -> None:
     try:
         data = pl.load(name)
