@@ -38,15 +38,36 @@ def remove_pid() -> None:
 
 
 def is_daemon_alive() -> int | None:
-    """Return PID if daemon is alive, else None. Cleans up stale PID file."""
+    """Return PID if daemon is alive *and* its control socket is reachable.
+
+    If the process exists but the socket is gone or unresponsive, the daemon
+    is considered stale — kill it and clean up.  Returns PID or None.
+    """
     pid = read_pid()
     if pid is None:
         return None
     try:
         os.kill(pid, 0)  # signal 0 = check existence
-        return pid
     except (ProcessLookupError, PermissionError):
-        # Process dead — clean up stale PID file
+        remove_pid()
+        return None
+
+    # Process alive — verify socket is reachable
+    import getpass
+    import socket
+    sock_path = f"/tmp/myplaylist-{getpass.getuser()}-ctl.sock"
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(1.0)
+        s.connect(sock_path)
+        s.close()
+        return pid
+    except (FileNotFoundError, ConnectionRefusedError, OSError):
+        # Daemon process exists but socket gone — stale, kill it
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
         remove_pid()
         return None
 

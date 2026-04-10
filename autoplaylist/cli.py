@@ -340,13 +340,30 @@ def _ctl_send(cmd: str, arg: str | None = None) -> dict:
     import json
     import socket
     import getpass
+    import time
 
     sock_path = f"/tmp/myplaylist-{getpass.getuser()}-ctl.sock"
-    try:
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(3.0)
-        s.connect(sock_path)
-    except (FileNotFoundError, ConnectionRefusedError, OSError):
+
+    # The daemon may still be starting (race after 'b' detach).
+    # If the PID file says a daemon is alive, retry briefly.
+    max_attempts = 1
+    from autoplaylist.daemon import is_daemon_alive
+    if is_daemon_alive():
+        max_attempts = 6  # up to ~3 s
+
+    s = None
+    for attempt in range(max_attempts):
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(3.0)
+            s.connect(sock_path)
+            break
+        except (FileNotFoundError, ConnectionRefusedError, OSError):
+            s = None
+            if attempt < max_attempts - 1:
+                time.sleep(0.5)
+
+    if s is None:
         from rich.console import Console
         Console().print("[red]No player is running[/red]")
         raise typer.Exit(code=1)
