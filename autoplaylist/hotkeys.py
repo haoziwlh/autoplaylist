@@ -190,6 +190,29 @@ def is_service_running() -> bool:
     return "skhd" in r.stdout
 
 
+def check_accessibility() -> bool:
+    """Check if skhd has Accessibility permission by inspecting its error log.
+
+    Returns True if no accessibility error is found (permission granted or
+    no log yet). Returns False if the log contains the 'accessibility' error.
+    """
+    import getpass
+    err_log = pathlib.Path(f"/tmp/skhd_{getpass.getuser()}.err.log")
+    if not err_log.exists():
+        return True
+    try:
+        content = err_log.read_text()
+        return "accessibility" not in content.lower()
+    except OSError:
+        return True
+
+
+def skhd_binary_path() -> str:
+    """Return the absolute path to the skhd binary for Accessibility setup."""
+    found = shutil.which("skhd")
+    return found or "/opt/homebrew/bin/skhd"
+
+
 # ---------------------------------------------------------------------------
 # Config persistence (custom bindings in ~/.myplaylist/config.json)
 # ---------------------------------------------------------------------------

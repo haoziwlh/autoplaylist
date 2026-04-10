@@ -279,22 +279,31 @@ def hotkeys(
         label = hk._ACTION_COMMANDS.get(action, action)
         c.print(f"  [cyan]{hotkey:20s}[/cyan]  →  {label}")
 
-    c.print(
-        "\n[bold yellow]⚠  Accessibility permission required[/bold yellow]\n"
-        "  skhd needs Accessibility access to capture global hotkeys.\n"
-        "  Open: [bold]System Settings → Privacy & Security → Accessibility[/bold]\n"
-        "  Add and enable [bold]skhd[/bold] in the list.\n"
-    )
-    # Offer to open System Settings directly
-    try:
-        import subprocess as _sp
-        _sp.run(
-            ["open", "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"],
-            check=False, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+    # Wait a moment for skhd to start and potentially write error log
+    import time
+    time.sleep(1.0)
+
+    if not hk.check_accessibility():
+        skhd_path = hk.skhd_binary_path()
+        c.print(
+            "\n[bold red]✗ skhd lacks Accessibility permission — hotkeys won't work[/bold red]\n"
+            "  Fix:\n"
+            "  1. Open [bold]System Settings → Privacy & Security → Accessibility[/bold]\n"
+            f"  2. Click [bold]+[/bold], navigate to [bold]{skhd_path}[/bold], add it\n"
+            "  3. Make sure the toggle is [bold]ON[/bold]\n"
+            "  4. Run [bold]myplaylist hotkeys[/bold] again\n"
         )
-        c.print("  [dim](System Settings opened)[/dim]\n")
-    except Exception:
-        pass
+        try:
+            import subprocess as _sp
+            _sp.run(
+                ["open", "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"],
+                check=False, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+            )
+            c.print("  [dim](System Settings opened)[/dim]\n")
+        except Exception:
+            pass
+    else:
+        c.print("\n[green]✓ skhd Accessibility permission OK — hotkeys are active[/green]\n")
 
 
 @app.command()
