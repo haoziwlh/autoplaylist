@@ -32,7 +32,7 @@ _ACTION_COMMANDS: dict[str, str] = {
     "next": "myplaylist ctl next",
     "quit": "myplaylist ctl quit",
     "mode": "myplaylist ctl mode",
-    "attach": 'osascript -e \'tell app "Terminal" to do script "myplaylist ctl status >/dev/null 2>&1 || myplaylist play --detach; sleep 1; myplaylist attach"\'',
+    "attach": 'osascript -e \'tell app "Terminal" to do script "myplaylist ctl status >/dev/null 2>&1 || myplaylist play --detach; sleep 1; exec myplaylist attach"\'',
 }
 
 

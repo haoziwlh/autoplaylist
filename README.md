@@ -176,7 +176,7 @@ The attach hotkey opens Terminal.app by default. To use **iTerm2** (new tab in e
 
 ```bash
 # Replace the ctrl + alt - a line with:
-ctrl + alt - a : osascript -e 'tell app "iTerm2"' -e 'if (count of windows) > 0 then' -e 'tell current window to create tab with default profile' -e 'else' -e 'create window with default profile' -e 'end if' -e 'tell current session of current window to write text "myplaylist ctl status >/dev/null 2>&1 || myplaylist play --detach; sleep 1; myplaylist attach"' -e 'end tell'
+ctrl + alt - a : osascript -e 'tell app "iTerm2"' -e 'if (count of windows) > 0 then' -e 'tell current window to create tab with default profile' -e 'else' -e 'create window with default profile' -e 'end if' -e 'tell current session of current window to write text "myplaylist ctl status >/dev/null 2>&1 || myplaylist play --detach; sleep 1; exec myplaylist attach"' -e 'end tell'
 ```
 
 
