@@ -142,6 +142,44 @@ myplaylist new "chill beats" --count 30 --name my-chill-list
 | `b` | Detach to background daemon (music keeps playing) |
 | `q` | Quit |
 
+## Background Playback & Global Hotkeys
+
+**Detach to background:** press `b` during playback or start with `myplaylist play --detach`. Music keeps playing after the terminal closes.
+
+**Remote control from any terminal:**
+
+```bash
+myplaylist ctl pause      # toggle pause
+myplaylist ctl next       # skip track
+myplaylist ctl status     # show what's playing
+myplaylist attach         # full TUI reconnect
+```
+
+**Global hotkeys (macOS):**
+
+```bash
+myplaylist hotkeys        # install skhd + configure default bindings
+myplaylist hotkeys --show # show current bindings
+```
+
+Default bindings (`Ctrl+Alt+…`):
+
+| Shortcut | Action |
+|---|---|
+| `Ctrl+Alt+P` | Pause / resume |
+| `Ctrl+Alt+N` | Next track |
+| `Ctrl+Alt+Q` | Quit daemon |
+| `Ctrl+Alt+R` | Cycle play mode |
+| `Ctrl+Alt+A` | Open attach TUI |
+
+The attach hotkey opens Terminal.app by default. To use **iTerm2** (new tab in existing window), edit `~/.config/skhd/skhdrc`:
+
+```bash
+# Replace the ctrl + alt - a line with:
+ctrl + alt - a : osascript -e 'tell app "iTerm2"' -e 'if (count of windows) > 0 then' -e 'tell current window to create tab with default profile' -e 'else' -e 'create window with default profile' -e 'end if' -e 'tell current session of current window to write text "myplaylist attach"' -e 'end tell'
+```
+
+
 ## Lyrics Panel
 
 Press `l` during playback to open a side panel with time-synced lyrics. The panel also shows a mood-driven ASCII animation in the margin — determined per track by the LLM (calm, melancholic, energetic, romantic, nostalgic).
