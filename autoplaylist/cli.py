@@ -215,5 +215,103 @@ def uninstall(
     _commands.cmd_uninstall(keep_data=keep_data)
 
 
+# ---------------------------------------------------------------------------
+# ctl — remote player control
+# ---------------------------------------------------------------------------
+
+ctl_app = typer.Typer(
+    name="ctl",
+    help="Send commands to a running player (next, pause, status, etc.).",
+)
+app.add_typer(ctl_app, name="ctl")
+
+
+def _ctl_send(cmd: str, arg: str | None = None) -> dict:
+    """Connect to the control socket, send a JSON-line command, return response."""
+    import json
+    import socket
+    import getpass
+
+    sock_path = f"/tmp/myplaylist-{getpass.getuser()}-ctl.sock"
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(3.0)
+        s.connect(sock_path)
+    except (FileNotFoundError, ConnectionRefusedError, OSError):
+        from rich.console import Console
+        Console().print("[red]No player is running[/red]")
+        raise typer.Exit(code=1)
+    req: dict = {"cmd": cmd}
+    if arg is not None:
+        req["arg"] = arg
+    s.sendall(json.dumps(req).encode() + b"\n")
+    data = b""
+    while b"\n" not in data and len(data) < 4096:
+        chunk = s.recv(1024)
+        if not chunk:
+            break
+        data += chunk
+    s.close()
+    try:
+        return json.loads(data.strip())
+    except (json.JSONDecodeError, ValueError):
+        return {"ok": False, "error": "bad response"}
+
+
+@ctl_app.command("status")
+def ctl_status() -> None:
+    """Show current playback status."""
+    resp = _ctl_send("status")
+    if not resp.get("ok"):
+        print(resp.get("error", "unknown error"))
+        raise typer.Exit(code=1)
+    st = resp["status"]
+    state = "Paused" if st["paused"] else "Playing"
+    label = f"{st['artist']} - {st['track']}" if st.get("artist") else st.get("track", "?")
+    print(f"{state} [{st['idx'] + 1}/{st['total']}] {label} ({st['mode']})")
+
+
+@ctl_app.command("next")
+def ctl_next() -> None:
+    """Skip to the next track."""
+    resp = _ctl_send("next")
+    if resp.get("ok"):
+        print("Skipped to next track")
+    else:
+        print(resp.get("error", "failed"))
+
+
+@ctl_app.command("pause")
+def ctl_pause() -> None:
+    """Toggle pause / resume."""
+    resp = _ctl_send("pause")
+    if resp.get("ok"):
+        print("Paused" if resp.get("paused") else "Resumed")
+    else:
+        print(resp.get("error", "failed"))
+
+
+@ctl_app.command("mode")
+def ctl_mode(
+    value: Optional[str] = typer.Argument(None, help="Set mode: seq, repeat, shuffle (omit to cycle)"),
+) -> None:
+    """Cycle or set play mode."""
+    resp = _ctl_send("mode", value)
+    if resp.get("ok"):
+        print(f"Mode: {resp.get('mode')}")
+    else:
+        print(resp.get("error", "failed"))
+
+
+@ctl_app.command("quit")
+def ctl_quit() -> None:
+    """Stop the player."""
+    resp = _ctl_send("quit")
+    if resp.get("ok"):
+        print("Player stopped")
+    else:
+        print(resp.get("error", "failed"))
+
+
 if __name__ == "__main__":
     app()

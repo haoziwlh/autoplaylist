@@ -18,6 +18,7 @@ from autoplaylist.discovery import Track
 
 import getpass as _getpass
 _IPC_SOCK = f"/tmp/myplaylist-{_getpass.getuser()}-mpv.sock"
+_CTL_SOCK = f"/tmp/myplaylist-{_getpass.getuser()}-ctl.sock"
 
 # ---------------------------------------------------------------------------
 # ANSI / box skin
@@ -1228,6 +1229,154 @@ class PlayerCore:
 
 
 # ---------------------------------------------------------------------------
+# Control socket server
+# ---------------------------------------------------------------------------
+
+class CtlServer:
+    """JSON-line control socket server for remote player commands.
+
+    Listens on a Unix domain socket.  Each client connection is handled in
+    its own daemon thread: read one JSON line, dispatch to PlayerCore,
+    write one JSON response, close.
+    """
+
+    def __init__(self, core: PlayerCore, sock_path: str = _CTL_SOCK) -> None:
+        self._core = core
+        self._sock_path = sock_path
+        self._sock: Optional[socket.socket] = None
+        self._thread: Optional[threading.Thread] = None
+        self._stop = threading.Event()
+
+    # ── lifecycle ────────────────────────────────────────────────────────
+
+    def start(self) -> None:
+        # Clean up stale socket from a crashed session
+        if os.path.exists(self._sock_path):
+            probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                probe.connect(self._sock_path)
+                probe.close()
+                # Another player is actually listening — don't steal it
+                return
+            except (ConnectionRefusedError, OSError):
+                os.unlink(self._sock_path)
+
+        self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self._sock.bind(self._sock_path)
+        self._sock.listen(4)
+        self._sock.settimeout(0.5)
+        self._thread = threading.Thread(target=self._accept_loop, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._sock:
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+        if self._thread:
+            self._thread.join(timeout=1.0)
+        try:
+            os.unlink(self._sock_path)
+        except FileNotFoundError:
+            pass
+
+    # ── accept loop ─────────────────────────────────────────────────────
+
+    def _accept_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                conn, _ = self._sock.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            threading.Thread(
+                target=self._handle_client, args=(conn,), daemon=True
+            ).start()
+
+    # ── client handler ──────────────────────────────────────────────────
+
+    def _handle_client(self, conn: socket.socket) -> None:
+        try:
+            conn.settimeout(2.0)
+            data = b""
+            while b"\n" not in data and len(data) < 4096:
+                chunk = conn.recv(1024)
+                if not chunk:
+                    break
+                data += chunk
+            if not data.strip():
+                return
+            try:
+                req = json.loads(data.strip())
+            except (json.JSONDecodeError, ValueError):
+                conn.sendall(json.dumps({"ok": False, "error": "invalid request"}).encode() + b"\n")
+                return
+            resp = self._dispatch(req)
+            conn.sendall(json.dumps(resp).encode() + b"\n")
+        except Exception:
+            pass
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+    # ── command dispatch ────────────────────────────────────────────────
+
+    def _dispatch(self, req: dict) -> dict:
+        cmd = req.get("cmd", "")
+        arg = req.get("arg")
+
+        if cmd == "status":
+            snap = self._core.snapshot()
+            track_name = ""
+            artist = ""
+            if self._core.tracks and 0 <= snap.current_idx < len(self._core.tracks):
+                t = self._core.tracks[snap.current_idx]
+                track_name = t.title
+                artist = t.artist
+            return {
+                "ok": True,
+                "status": {
+                    "track": track_name,
+                    "artist": artist,
+                    "idx": snap.current_idx,
+                    "total": snap.tracks_count,
+                    "paused": snap.paused,
+                    "mode": snap.play_mode,
+                },
+            }
+
+        if cmd == "next":
+            self._core.next_track()
+            self._core._ui_q.put(("ctl_next",))
+            return {"ok": True}
+
+        if cmd == "pause":
+            new_paused = self._core.toggle_pause()
+            self._core._ui_q.put(("ctl_pause",))
+            return {"ok": True, "paused": new_paused}
+
+        if cmd == "mode":
+            if arg and arg in ("seq", "repeat", "shuffle"):
+                self._core.set_mode(arg)
+            else:
+                self._core.cycle_mode()
+            self._core._ui_q.put(("ctl_mode",))
+            return {"ok": True, "mode": self._core.play_mode}
+
+        if cmd == "quit":
+            self._core.request_quit()
+            self._core._ui_q.put(("ctl_quit",))
+            return {"ok": True}
+
+        return {"ok": False, "error": f"unknown command: {cmd}"}
+
+
+# ---------------------------------------------------------------------------
 # Main player
 # ---------------------------------------------------------------------------
 
@@ -1543,6 +1692,8 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
     key_reader  = _KeyReader()
     key_reader.start()
     core.start()  # spawn core.run() event loop thread
+    ctl_server = CtlServer(core)
+    ctl_server.start()
 
     _orig_sigint = signal.getsignal(signal.SIGINT)
 
@@ -1551,7 +1702,7 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
     stop_current = core.stop_current
 
     def _sigint_handler(signum, frame):
-        key_reader.stop(); stop_current(); _restore_terminal()
+        key_reader.stop(); stop_current(); ctl_server.stop(); _restore_terminal()
         signal.signal(signal.SIGINT, _orig_sigint)
         sys.stdout.write(_NL); raise KeyboardInterrupt
     signal.signal(signal.SIGINT, _sigint_handler)
@@ -2045,11 +2196,34 @@ def play_playlist(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
                                 sys.stdout.flush()
                             _update_lyric_header()
                         break
+                    if tag == "ctl_quit":
+                        sys.stdout.write(_NL)
+                        return
+                    if tag == "ctl_next":
+                        # Remote next — core already advanced; repaint + break
+                        if core.current_idx < len(core.tracks):
+                            core.cursor_idx = core.current_idx
+                            if _scroll_to(core.current_idx):
+                                _redraw_viewport(); _update_header()
+                            _update_lyric_header()
+                        break
+                    if tag in ("ctl_pause", "ctl_mode"):
+                        # Remote pause/mode — redraw status + controls
+                        state = "Paused " if core.paused else "Playing"
+                        _status(f"{_cache_mark}{state}  [{core.current_idx + 1}/{len(core.tracks)}]  {label}")
+                        _draw_track(core.current_idx, True, core.paused, core.cursor_idx == core.current_idx)
+                        if core.lyric_panel_on and core.panel_widths:
+                            _, plw, lw = core.panel_widths
+                            _full_repaint(True, plw, lw)
+                        else:
+                            _full_repaint(False, _IW, 0)
+                        sys.stdout.flush()
 
     finally:
         signal.signal(signal.SIGINT, _orig_sigint)
         key_reader.stop()
         stop_current()
+        ctl_server.stop()
         core.shutdown()
         _restore_terminal()
         sys.stdout.write(_NL)
