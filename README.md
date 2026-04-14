@@ -119,6 +119,7 @@ myplaylist new "chill beats" --count 30 --name my-chill-list
 | `myplaylist hotkeys --show` | Show current hotkey bindings |
 | `myplaylist hotkeys --remove` | Remove hotkeys and stop skhd |
 | `myplaylist setup` | Choose LLM backend and configure API keys |
+| `myplaylist doctor` | Diagnose playback prerequisites (yt-dlp, mpv, JS runtime) |
 
 ## Playback Controls
 
