@@ -213,6 +213,13 @@ def setup() -> None:
 
 
 @app.command()
+def doctor() -> None:
+    """Diagnose playback prerequisites (yt-dlp, mpv, JS runtime, yt-dlp-ejs)."""
+    from autoplaylist import doctor as _doctor
+    _doctor.run()
+
+
+@app.command()
 def uninstall(
     keep_data: bool = typer.Option(False, "--keep-data", help="Keep playlists and config"),
 ) -> None:

@@ -233,7 +233,8 @@ def _launch_mpv(
         log_fh.flush()
 
     ytdlp_proc = subprocess.Popen(
-        [ytdlp_path, "-f", "bestaudio/best", "-o", "-", "--no-playlist"]
+        [ytdlp_path, "-f", "bestaudio/best", "-o", "-", "--no-playlist",
+         "--remote-components", "ejs:github"]
         + cookie_args
         + [youtube_url]
         + ([] if debug else ["--quiet"]),

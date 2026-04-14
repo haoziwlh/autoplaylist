@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import pathlib
 import platform
 import shutil
 import subprocess
@@ -79,6 +80,148 @@ def _ensure_mpv() -> None:
         raise SystemExit(1)
 
     console.print("[green]✓ mpv installed[/green]")
+
+
+# ---------------------------------------------------------------------------
+# 2.3a  YouTube signature decryption prerequisites
+# ---------------------------------------------------------------------------
+
+_JS_RUNTIMES = ("deno", "node", "bun", "qjs")  # yt-dlp probes these by name
+_EXTRA_PATHS = ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin")
+
+
+def _detect_js_runtime() -> tuple[str, str] | None:
+    """Return (runtime-name, path) for the first available JS runtime, else None."""
+    for name in _JS_RUNTIMES:
+        p = shutil.which(name)
+        if p:
+            return (name, p)
+        for d in _EXTRA_PATHS:
+            candidate = pathlib.Path(d) / name
+            if candidate.exists():
+                return (name, str(candidate))
+    return None
+
+
+def _detect_ytdlp_install_kind(ytdlp_path: str) -> str:
+    """Classify yt-dlp install as 'pipx' | 'user-pip' | 'homebrew' | 'other'."""
+    try:
+        resolved = str(pathlib.Path(ytdlp_path).resolve())
+    except Exception:
+        resolved = ytdlp_path
+    home = str(pathlib.Path.home())
+    if "/pipx/venvs/" in resolved or resolved.startswith(f"{home}/.local/pipx/"):
+        return "pipx"
+    if "/Cellar/" in resolved or resolved.startswith("/opt/homebrew/") or \
+            (resolved.startswith("/usr/local/") and "Cellar" in resolved):
+        return "homebrew"
+    if resolved.startswith(f"{home}/.local/bin/") or "/Library/Python/" in resolved:
+        return "user-pip"
+    return "other"
+
+
+def _ytdlp_python(ytdlp_path: str) -> str | None:
+    """Return the Python interpreter that runs this yt-dlp script (from shebang)."""
+    try:
+        with open(ytdlp_path, "r", encoding="utf-8", errors="ignore") as f:
+            first = f.readline().strip()
+    except Exception:
+        return None
+    if first.startswith("#!") and ("python" in first or "pypy" in first):
+        return first[2:].strip()
+    return None
+
+
+def _has_ytdlp_ejs(ytdlp_path: str) -> bool:
+    python = _ytdlp_python(ytdlp_path)
+    if not python:
+        return False
+    try:
+        r = subprocess.run(
+            [python, "-c", "import yt_dlp_ejs"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _install_hint_missing_runtime() -> str:
+    system = platform.system()
+    if system == "Darwin":
+        return "install one with: [cyan]brew install deno[/cyan]"
+    if system == "Linux":
+        return "install one with your package manager, e.g. [cyan]curl -fsSL https://deno.land/install.sh | sh[/cyan]"
+    return "install deno from https://deno.land/"
+
+
+def _ensure_ytdlp_ejs(ytdlp_path: str) -> str:
+    """Try to install yt-dlp-ejs into the env that runs yt-dlp.
+
+    Returns a short status string suitable for the summary line.
+    """
+    if _has_ytdlp_ejs(ytdlp_path):
+        return "installed"
+
+    kind = _detect_ytdlp_install_kind(ytdlp_path)
+
+    if kind == "homebrew":
+        return "managed by homebrew (remote fallback active)"
+
+    if kind == "pipx":
+        if not shutil.which("pipx"):
+            return "inject skipped (pipx not on PATH; remote fallback active)"
+        # Determine which pipx-managed package owns this yt-dlp.
+        # If yt-dlp venv: `pipx inject yt-dlp yt-dlp-ejs`.
+        # If myplaylist venv contains yt-dlp: inject into myplaylist.
+        resolved = str(pathlib.Path(ytdlp_path).resolve())
+        target = "yt-dlp"
+        if "/venvs/myplaylist/" in resolved:
+            target = "myplaylist"
+        try:
+            subprocess.check_call(
+                ["pipx", "inject", target, "yt-dlp-ejs"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            return "installed"
+        except Exception:
+            return "inject failed (remote fallback active)"
+
+    if kind == "user-pip":
+        python = _ytdlp_python(ytdlp_path) or sys.executable
+        try:
+            subprocess.check_call(
+                [python, "-m", "pip", "install", "--user", "--quiet", "yt-dlp-ejs"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            return "installed"
+        except Exception:
+            return "inject failed (remote fallback active)"
+
+    # "other" — unknown install; don't risk polluting a system Python.
+    return "install skipped (remote fallback active)"
+
+
+def _setup_youtube_decrypt() -> None:
+    """Detect JS runtime + try to install yt-dlp-ejs. Never raises."""
+    from autoplaylist.player import _find_ytdlp
+
+    console.print("\n[bold cyan]YouTube Signature Decryption[/bold cyan]")
+
+    runtime = _detect_js_runtime()
+    if runtime:
+        name, path = runtime
+        console.print(f"  js-runtime:   [green]{name}[/green] ({path}) ✓")
+    else:
+        console.print(
+            f"  js-runtime:   [yellow]missing ⚠[/yellow] — {_install_hint_missing_runtime()}"
+        )
+
+    ytdlp_path = _find_ytdlp()
+    status = _ensure_ytdlp_ejs(ytdlp_path)
+    color = "green" if status == "installed" else "yellow"
+    console.print(f"  yt-dlp-ejs:   [{color}]{status}[/{color}]")
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +403,7 @@ def ensure_setup(force: bool = False) -> None:
     _setup_llm()
     _ensure_python_packages()
     _ensure_mpv()
+    _setup_youtube_decrypt()
     _setup_lastfm()
 
     cfg.set_value("setup_complete", True)

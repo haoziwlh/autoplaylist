@@ -248,6 +248,17 @@ YouTube occasionally requires authentication for certain IPs. myplaylist automat
    myplaylist config --cookie-file ~/cookies.txt
    ```
 
+**YouTube signature decryption errors** (e.g. `Some formats may be missing` or `nsig extraction failed`)
+
+YouTube requires a JavaScript runtime to decrypt video signatures. myplaylist passes `--remote-components ejs:github` to fetch the decryption script on the fly — but you still need a local JS runtime. Install one:
+
+```bash
+brew install deno           # recommended (macOS)
+# or: brew install node / bun
+```
+
+Run `myplaylist doctor` to confirm the runtime is detected. The `doctor` output also shows whether `yt-dlp-ejs` is installed locally (reduces per-play network calls).
+
 **`myplaylist` command not found after install**
 
 Open a new terminal, or run:
