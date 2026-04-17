@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import getpass
+import os
 import pathlib
 import shutil
+import subprocess
 
 from rich.console import Console
 
@@ -11,6 +14,27 @@ from autoplaylist.setup import (
     _detect_ytdlp_install_kind,
     _has_ytdlp_ejs,
 )
+
+_IPC_SOCK = f"/tmp/myplaylist-{getpass.getuser()}-mpv.sock"
+
+
+def _find_orphan_mpv() -> list[int]:
+    """Return PIDs of mpv processes using our IPC socket with no live daemon."""
+    try:
+        out = subprocess.check_output(
+            ["pgrep", "-f", f"mpv.*{_IPC_SOCK}"],
+            text=True, stderr=subprocess.DEVNULL,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return []
+    pids = [int(p) for p in out.strip().splitlines() if p.strip()]
+    if not pids:
+        return []
+    # If a daemon is alive and owns them, they're not orphans
+    from autoplaylist.daemon import is_daemon_alive
+    if is_daemon_alive():
+        return []
+    return pids
 
 
 def run() -> None:
@@ -46,5 +70,24 @@ def run() -> None:
         c.print(f"  yt-dlp-ejs:   [green]installed[/green]  ✓")
     else:
         c.print(f"  yt-dlp-ejs:   [yellow]missing (remote fallback via --remote-components ejs:github)[/yellow]")
+
+    # Orphan process detection
+    from autoplaylist.daemon import read_pid
+    stale_pid = read_pid()
+    if stale_pid is not None:
+        try:
+            os.kill(stale_pid, 0)
+        except ProcessLookupError:
+            c.print(f"  daemon:       [yellow]stale PID file ({stale_pid} not running)[/yellow]"
+                     " — run `myplaylist ctl quit` or delete ~/.myplaylist/daemon.pid")
+            stale_pid = None
+
+    orphans = _find_orphan_mpv()
+    if orphans:
+        pids_str = ", ".join(str(p) for p in orphans)
+        c.print(f"  orphan mpv:   [red]{len(orphans)} orphan(s) (PID {pids_str})[/red]"
+                 f" — kill with: kill {pids_str}")
+    else:
+        c.print(f"  orphan mpv:   [green]none[/green]  ✓")
 
     c.print()

@@ -5,6 +5,7 @@ playback entry point.
 """
 from __future__ import annotations
 
+import getpass
 import os
 import pathlib
 import signal
@@ -12,6 +13,7 @@ import sys
 
 _PID_FILE = pathlib.Path.home() / ".myplaylist" / "daemon.pid"
 _LOG_FILE = pathlib.Path.home() / ".myplaylist" / "daemon.log"
+_CTL_SOCK = f"/tmp/myplaylist-{getpass.getuser()}-ctl.sock"
 
 
 # ---------------------------------------------------------------------------
@@ -37,11 +39,40 @@ def remove_pid() -> None:
         pass
 
 
+def _force_kill(pid: int) -> None:
+    """Send SIGTERM, wait up to 2 s, escalate to SIGKILL, confirm death."""
+    import time
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        return
+    for _ in range(20):          # poll 2 s
+        time.sleep(0.1)
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return               # dead
+        except PermissionError:
+            break
+    # Still alive — escalate
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        return
+    for _ in range(10):          # poll 1 s
+        time.sleep(0.1)
+        try:
+            os.kill(pid, 0)
+        except (ProcessLookupError, PermissionError):
+            return
+
+
 def is_daemon_alive() -> int | None:
     """Return PID if daemon is alive *and* its control socket is reachable.
 
     If the process exists but the socket is gone or unresponsive, the daemon
-    is considered stale — kill it and clean up.  Returns PID or None.
+    is considered stale — kill it *and wait for it to die* before returning
+    None, so that the caller can safely start a new daemon without racing.
     """
     pid = read_pid()
     if pid is None:
@@ -53,21 +84,17 @@ def is_daemon_alive() -> int | None:
         return None
 
     # Process alive — verify socket is reachable
-    import getpass
     import socket
-    sock_path = f"/tmp/myplaylist-{getpass.getuser()}-ctl.sock"
     try:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.settimeout(1.0)
-        s.connect(sock_path)
+        s.connect(_CTL_SOCK)
         s.close()
         return pid
     except (FileNotFoundError, ConnectionRefusedError, OSError):
-        # Daemon process exists but socket gone — stale, kill it
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            pass
+        # Daemon process exists but socket gone — stale, kill it and
+        # wait until it's truly gone before returning.
+        _force_kill(pid)
         remove_pid()
         return None
 

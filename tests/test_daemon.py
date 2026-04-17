@@ -61,18 +61,34 @@ class TestPidHelpers:
 
     def test_is_daemon_alive_current_process(self, tmp_path, monkeypatch):
         pid_file = tmp_path / "daemon.pid"
+        ctl_sock = f"/tmp/test-ctl-{uuid.uuid4().hex[:8]}.sock"
         from autoplaylist import daemon
         monkeypatch.setattr(daemon, "_PID_FILE", pid_file)
+        monkeypatch.setattr(daemon, "_CTL_SOCK", ctl_sock)
 
-        daemon.write_pid()
-        import os
-        assert daemon.is_daemon_alive() == os.getpid()
-        daemon.remove_pid()
+        # Start a listener so the socket check succeeds
+        import socket as _socket
+        srv = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        srv.bind(ctl_sock)
+        srv.listen(1)
+
+        try:
+            daemon.write_pid()
+            import os
+            assert daemon.is_daemon_alive() == os.getpid()
+            daemon.remove_pid()
+        finally:
+            srv.close()
+            try:
+                os.unlink(ctl_sock)
+            except FileNotFoundError:
+                pass
 
     def test_is_daemon_alive_stale(self, tmp_path, monkeypatch):
         pid_file = tmp_path / "daemon.pid"
         from autoplaylist import daemon
         monkeypatch.setattr(daemon, "_PID_FILE", pid_file)
+        monkeypatch.setattr(daemon, "_CTL_SOCK", str(tmp_path / "ctl.sock"))
 
         # Write a PID that doesn't exist
         pid_file.write_text("99999999")

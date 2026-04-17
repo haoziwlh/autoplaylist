@@ -1056,9 +1056,15 @@ class PlayerCore:
         if self.ytdlp_proc and self.ytdlp_proc.poll() is None:
             self.ytdlp_proc.kill()
         if self.mpv_proc:
-            self.mpv_proc.wait()
+            try:
+                self.mpv_proc.wait(timeout=2)
+            except Exception:
+                pass
         if self.ytdlp_proc:
-            self.ytdlp_proc.wait()
+            try:
+                self.ytdlp_proc.wait(timeout=2)
+            except Exception:
+                pass
         self.mpv_proc = self.ytdlp_proc = None
 
     def toggle_pause(self) -> bool:
@@ -1259,10 +1265,25 @@ class CtlServer:
             try:
                 probe.connect(self._sock_path)
                 probe.close()
-                # Another player is actually listening — don't steal it
-                return
+                # Something is listening — check if a live daemon owns it
+                from autoplaylist.daemon import read_pid
+                pid = read_pid()
+                if pid is not None:
+                    try:
+                        os.kill(pid, 0)
+                        return  # Legitimate daemon running — don't steal
+                    except (ProcessLookupError, PermissionError):
+                        pass
+                # Orphaned socket (no live daemon) — take over
+                try:
+                    os.unlink(self._sock_path)
+                except FileNotFoundError:
+                    pass
             except (ConnectionRefusedError, OSError):
-                os.unlink(self._sock_path)
+                try:
+                    os.unlink(self._sock_path)
+                except FileNotFoundError:
+                    pass
 
         self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._sock.bind(self._sock_path)
@@ -1566,6 +1587,29 @@ def play_headless(playlists: list[dict], active_idx: int = 0, debug: bool = Fals
     ctl_server = CtlServer(core)
     ctl_server.start()
     core.start()
+
+    # Override daemon's generic SIGTERM with one that directly kills child
+    # processes.  The daemon.py handler only does remove_pid + sys.exit,
+    # relying on the finally chain — which can miss if the main thread is
+    # blocked in C or the user escalates to kill -9.
+    def _headless_shutdown(signum, frame):
+        try:
+            core.stop_current()
+        except Exception:
+            for proc in (core.mpv_proc, core.ytdlp_proc):
+                if proc and hasattr(proc, "pid"):
+                    try:
+                        os.kill(proc.pid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+        try:
+            ctl_server.stop()
+        except Exception:
+            pass
+        from autoplaylist.daemon import remove_pid
+        remove_pid()
+        os._exit(0)
+    signal.signal(signal.SIGTERM, _headless_shutdown)
 
     from autoplaylist import lyrics as _lyr
     from autoplaylist import cache as _cache
